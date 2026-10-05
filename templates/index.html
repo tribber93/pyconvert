@@ -40,6 +40,11 @@
                 <a href="/files" target="_blank" class="badge-item" title="Buka File Manager (Uploads, Temp, Output)" style="text-decoration:none; color:#38bdf8; font-weight:600;">
                     <i class="fa-solid fa-folder-tree"></i> File Manager
                 </a>
+                <form method="POST" action="{{ url_for('logout') }}" class="logout-form">
+                    <button type="submit" class="badge-item logout-btn" title="Keluar dari sesi ini">
+                        <i class="fa-solid fa-right-from-bracket"></i> Keluar
+                    </button>
+                </form>
             </div>
         </header>
 

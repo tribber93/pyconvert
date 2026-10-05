@@ -595,6 +595,126 @@ body {
     background: #000;
 }
 
+/* Login Page */
+.login-wrapper {
+    min-height: calc(100vh - 40px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.login-card {
+    width: 100%;
+    max-width: 400px;
+    background: var(--bg-card);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: 36px 32px;
+    box-shadow: var(--shadow-main);
+}
+
+.login-brand {
+    text-align: center;
+    margin-bottom: 24px;
+}
+
+.login-brand .brand-icon {
+    margin: 0 auto 16px;
+}
+
+.login-brand h1 {
+    font-size: 1.3rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.login-brand h1 span {
+    color: var(--accent-cyan);
+    font-weight: 400;
+}
+
+.login-form label {
+    display: block;
+    font-size: 0.83rem;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
+.login-input-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 0 14px;
+    margin-bottom: 18px;
+    transition: var(--transition);
+}
+
+.login-input-group:focus-within {
+    border-color: var(--accent-violet);
+    box-shadow: 0 0 0 3px var(--accent-violet-glow);
+}
+
+.login-input-group i {
+    color: var(--text-dim);
+}
+
+.login-input-group input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-main);
+    font-size: 0.95rem;
+    font-family: inherit;
+    padding: 13px 0;
+}
+
+.login-submit {
+    width: 100%;
+    justify-content: center;
+    padding: 12px 20px;
+}
+
+.login-error {
+    background: rgba(244, 63, 94, 0.12);
+    border: 1px solid rgba(244, 63, 94, 0.3);
+    color: var(--accent-rose);
+    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    margin-bottom: 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.login-foot {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    margin-top: 20px;
+}
+
+/* Logout button in header */
+.logout-form {
+    display: inline;
+}
+
+.logout-btn {
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.8rem;
+}
+
+.logout-btn:hover {
+    border-color: var(--accent-rose);
+    color: var(--accent-rose);
+}
+
 .text-center {
     text-align: center;
 }

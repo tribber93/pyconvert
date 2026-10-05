@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Masuk - SWF to MP4 Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="login-wrapper">
+        <div class="login-card">
+            <div class="login-brand">
+                <div class="brand-icon">
+                    <i class="fa-solid fa-film"></i>
+                </div>
+                <h1>SWF <span>to</span> MP4 Studio</h1>
+                <p class="subtitle">Masukkan password untuk melanjutkan</p>
+            </div>
+
+            {% if error %}
+            <div class="login-error">
+                <i class="fa-solid fa-triangle-exclamation"></i> {{ error }}
+            </div>
+            {% endif %}
+
+            <form method="POST" action="{{ url_for('login') }}" class="login-form">
+                <input type="hidden" name="next" value="{{ next_url }}">
+                <label for="password">Password</label>
+                <div class="login-input-group">
+                    <i class="fa-solid fa-lock"></i>
+                    <input type="password" id="password" name="password"
+                           placeholder="Masukkan password" autocomplete="current-password"
+                           autofocus required>
+                </div>
+                <button type="submit" class="btn btn-primary login-submit">
+                    <i class="fa-solid fa-right-to-bracket"></i> Masuk
+                </button>
+            </form>
+
+            <p class="login-foot">Akses ini dilindungi password.</p>
+        </div>
+    </div>
+</body>
+</html>

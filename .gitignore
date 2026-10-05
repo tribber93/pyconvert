@@ -3,3 +3,5 @@
 /temp
 /uploads
 /.venv
+__pycache__
+/instance

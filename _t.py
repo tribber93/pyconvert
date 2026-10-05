@@ -1,54 +1,56 @@
 import io
-import pathlib
 import app as appmod
 
-client = appmod.app.test_client()
+PASSWORD = appmod.APP_PASSWORD
+print("PASSWORD_LOADED", PASSWORD == "432187659")
 
-# Jangan benar-benar jalankan konversi; cukup catat submit-nya
-submitted = []
-appmod.executor.submit = lambda fn, tid: submitted.append(tid)
 
-data = {
-    "files[]": [
-        (io.BytesIO(b"FWS\x0a\x00\x00\x00"), "a.swf"),
-        (io.BytesIO(b"FWS\x0a\x00\x00\x00"), "b.swf"),
-    ],
-    "paths[]": ["Kursus IPA/bab1/a.swf", "Kursus IPA/bab1/sub/b.swf"],
-}
-r = client.post("/api/upload", data=data, content_type="multipart/form-data")
-body = r.get_json()
-print("UPLOAD", r.status_code, "count:", body.get("count"))
-ids = [t["id"] for t in body["tasks"]]
-print("IDS", ids)
+def new_client():
+    return appmod.app.test_client()
 
-# /api/tasks harus tetap bisa di-JSON-kan (tidak ada objek Popen di dict)
-rt = client.get("/api/tasks")
-print("TASKS", rt.status_code, "items:", len(rt.get_json()))
 
-# 1. Batalkan task pertama (masih antre) -> harus LANGSUNG hilang dari daftar
-rc = client.post(f"/api/cancel/{ids[0]}")
-print("CANCEL", rc.status_code, rc.get_json())
-rt = client.get("/api/tasks").get_json()
-print("ITEMS_AFTER_CANCEL", len(rt), "remaining:", [t["id"] for t in rt])
-print("CANCELLED_STILL_LISTED", any(t["id"] == ids[0] for t in rt))
-print("DETAIL_AFTER_CANCEL", client.get(f"/api/tasks/{ids[0]}").status_code)
+# 1. Tanpa login: halaman utama dialihkan ke /login
+c = new_client()
+r = c.get("/")
+print("ROOT_NOAUTH", r.status_code, "->", r.headers.get("Location"))
 
-# 2. Task yang sudah dibatalkan tidak boleh diproses walau worker akhirnya dipanggil
-appmod.convert_swf_to_mp4(ids[0])
-print("ITEMS_AFTER_WORKER", len(client.get("/api/tasks").get_json()))
+# 2. Tanpa login: API harus 401 (bukan redirect HTML)
+print("API_NOAUTH", c.get("/api/tasks").status_code)
+print("STREAM_NOAUTH", c.get("/api/stream").status_code)
 
-# 3. Retry task yang sudah dihapus -> 404
-print("RETRY_DELETED", client.post(f"/api/retry/{ids[0]}").status_code)
+# 3. Halaman login sendiri harus bisa diakses
+print("LOGIN_PAGE", c.get("/login").status_code)
 
-# 4. Retry dari status berjalan harus ditolak (409)
-print("RETRY_RUNNING", client.post(f"/api/retry/{ids[1]}").status_code)
+# 4. Password salah -> tetap di halaman login, tidak ada session
+r = c.post("/login", data={"password": "salah"})
+print("LOGIN_WRONG", r.status_code, "| masih ditolak:", c.get("/api/tasks").status_code)
 
-# 5. Batal task yang tidak ada
-print("CANCEL_404", client.post("/api/cancel/tidakada").status_code)
+# 5. Password benar -> login sukses dan session berlaku
+r = c.post("/login", data={"password": PASSWORD})
+print("LOGIN_OK", r.status_code, "->", r.headers.get("Location"))
+print("API_AFTER_LOGIN", c.get("/api/tasks").status_code)
+print("ROOT_AFTER_LOGIN", c.get("/").status_code)
 
-# 6. Output harus mengikuti nama folder asal
-for rel_dir, stem in [("Kursus IPA/bab1", "a"), ("Kursus IPA/bab1/sub", "b")]:
-    p = appmod.build_output_path(rel_dir, stem)
-    print("OUT", repr(rel_dir), "->", p.relative_to(appmod.BASE_DIR))
-print("TRAVERSAL ->", appmod.build_output_path("../../etc", "x").relative_to(appmod.BASE_DIR))
-print("NON-ASCII ->", appmod.build_output_path("りんご/赤", "青").relative_to(appmod.BASE_DIR))
+# 6. Semua route penting harus terbuka setelah login
+for path in ["/files", "/uploads", "/temp", "/output", "/api/env", "/api/tasks"]:
+    print("AUTH_ROUTE", path, c.get(path).status_code)
+
+# 7. Open redirect harus dicegah: next ke situs luar diabaikan
+c2 = new_client()
+r = c2.post("/login?next=https://evil.example.com", data={"password": PASSWORD})
+print("OPEN_REDIRECT", r.status_code, "->", r.headers.get("Location"))
+
+# 8. next internal tetap dihormati
+c3 = new_client()
+r = c3.post("/login?next=/files", data={"password": PASSWORD})
+print("NEXT_INTERNAL", r.status_code, "->", r.headers.get("Location"))
+
+# 9. Logout menghapus session
+print("LOGOUT", c.post("/logout").status_code)
+print("API_AFTER_LOGOUT", c.get("/api/tasks").status_code)
+
+# 10. Operasi tulis (upload) juga wajib login
+c4 = new_client()
+r = c4.post("/api/upload", data={"files[]": (io.BytesIO(b"FWS"), "a.swf")},
+            content_type="multipart/form-data")
+print("UPLOAD_NOAUTH", r.status_code)

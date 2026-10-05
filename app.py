@@ -5,14 +5,18 @@ import glob
 import json
 import time
 import uuid
+import hmac
 import shutil
+import secrets
 import zipfile
 import threading
 import subprocess
 from pathlib import Path
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, stream_with_context
+from flask import (Flask, render_template, request, jsonify, send_file,
+                   send_from_directory, Response, stream_with_context,
+                   session, redirect, url_for)
 from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -21,12 +25,112 @@ OUTPUT_DIR = BASE_DIR / "output"
 TEMP_DIR = BASE_DIR / "temp"
 FFDEC_DIR = BASE_DIR / "ffdec"
 FFDEC_JAR = FFDEC_DIR / "ffdec.jar"
+INSTANCE_DIR = BASE_DIR / "instance"
 
-for folder in [UPLOADS_DIR, OUTPUT_DIR, TEMP_DIR, FFDEC_DIR]:
+for folder in [UPLOADS_DIR, OUTPUT_DIR, TEMP_DIR, FFDEC_DIR, INSTANCE_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max upload limit
+
+# ---------------------------------------------------------------------------
+# Autentikasi
+# ---------------------------------------------------------------------------
+# Password aplikasi. Untuk deploy, sebaiknya diatur lewat environment variable
+# PYCONVERT_PASSWORD; nilai di bawah adalah default yang diminta.
+APP_PASSWORD = os.environ.get("PYCONVERT_PASSWORD") or "432187659"
+
+
+def _load_secret_key():
+    """
+    SECRET_KEY untuk menandatangani cookie session.
+    Dibuat acak sekali lalu disimpan di instance/secret_key supaya session tetap
+    valid setelah server restart (kalau dibiarkan acak tiap start, semua orang
+    akan ter-logout setiap kali server dijalankan ulang).
+    """
+    env_key = os.environ.get("PYCONVERT_SECRET_KEY")
+    if env_key:
+        return env_key
+    key_file = INSTANCE_DIR / "secret_key"
+    try:
+        if key_file.exists():
+            return key_file.read_bytes()
+    except Exception:
+        pass
+    key = secrets.token_bytes(32)
+    try:
+        key_file.write_bytes(key)
+        os.chmod(key_file, 0o600)
+    except Exception:
+        pass
+    return key
+
+
+app.config.update(
+    SECRET_KEY=_load_secret_key(),
+    SESSION_COOKIE_HTTPONLY=True,   # cookie tidak bisa dibaca JavaScript
+    SESSION_COOKIE_SAMESITE="Lax",  # mencegah cookie ikut pada POST lintas situs
+    PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7,  # 7 hari
+)
+
+# Endpoint yang boleh diakses tanpa login (halaman login & file statis).
+PUBLIC_ENDPOINTS = {"login", "static"}
+
+
+def _password_valid(candidate):
+    """Bandingkan password dengan waktu konstan agar tidak bocor lewat timing."""
+    return hmac.compare_digest(str(candidate), str(APP_PASSWORD))
+
+
+def _safe_next_url(url):
+    """Hanya izinkan redirect internal, cegah open redirect ke situs lain."""
+    return bool(url) and url.startswith("/") and not url.startswith("//") and "\\" not in url
+
+
+@app.before_request
+def require_login():
+    """Gerbang utama: semua halaman & API wajib login dulu."""
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return None
+    if request.path.startswith("/static/"):
+        return None
+    if session.get("authed"):
+        return None
+    # Endpoint API balas JSON (dipakai fetch), halaman biasa dialihkan ke login
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Silakan login terlebih dahulu"}), 401
+    nxt = request.path
+    if request.query_string:
+        nxt += "?" + request.query_string.decode("utf-8", "ignore")
+    return redirect(url_for("login", next=nxt))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if session.get("authed"):
+        return redirect(url_for("index"))
+
+    error = None
+    next_url = request.values.get("next", "")
+
+    if request.method == "POST":
+        if _password_valid(request.form.get("password", "")):
+            session.clear()
+            session["authed"] = True
+            session.permanent = True
+            return redirect(next_url if _safe_next_url(next_url) else url_for("index"))
+        error = "Password salah. Silakan coba lagi."
+        # Perlambat upaya coba-coba password
+        time.sleep(0.5)
+
+    return render_template("login.html", error=error, next_url=next_url)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
 
 _ILLEGAL_NAME_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
 _RESERVED_WIN_NAMES = {
@@ -1259,6 +1363,10 @@ def stream_updates():
     """Server-Sent Events (SSE) stream for real-time task updates."""
     def event_stream():
         while True:
+            # Tutup stream bila session sudah tidak valid (mis. logout / kedaluwarsa)
+            # supaya halaman lama tidak terus menerima update tanpa hak akses.
+            if not session.get("authed"):
+                break
             with tasks_lock:
                 task_list = list(tasks.values())
             data = json.dumps(task_list)
@@ -1276,4 +1384,12 @@ if __name__ == "__main__":
     print(f"   - FFmpeg Installed:{'[OK]' if env['ffmpeg'] else '[MISSING]'}")
     print(f"   - FFDec Jar Exist: {'[OK]' if env['ffdec'] else '[MISSING]'}")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    print("  Login diperlukan. Password diambil dari PYCONVERT_PASSWORD")
+    print("  (default terpasang bila environment variable tidak diisi).")
+    print("=" * 60)
+    # debug dimatikan secara default karena aplikasi ini untuk dideploy:
+    # mode debug membuka Werkzeug debugger (bisa jadi eksekusi kode dari jarak
+    # jauh) dan auto-reloader. Nyalakan hanya saat pengembangan lokal lewat
+    # PYCONVERT_DEBUG=1.
+    debug_mode = os.environ.get("PYCONVERT_DEBUG") == "1"
+    app.run(host="0.0.0.0", port=5000, debug=debug_mode, threaded=True)

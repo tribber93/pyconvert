@@ -235,6 +235,23 @@ function initSSE() {
             console.error('SSE Error:', e);
         }
     };
+
+    // Koneksi SSE terputus. Bisa karena session habis, bisa juga karena
+    // gangguan jaringan biasa — jadi dipastikan dulu lewat /api/tasks supaya
+    // tidak salah melempar pengguna ke halaman login.
+    eventSource.onerror = async () => {
+        if (!eventSource || eventSource.readyState !== EventSource.CLOSED) return;
+        try {
+            const res = await fetch('/api/tasks');
+            if (res.status === 401) {
+                window.location.href = '/login';
+            } else {
+                setTimeout(initSSE, 2000); // jaringan pulih: sambung ulang
+            }
+        } catch (e) {
+            setTimeout(initSSE, 3000);
+        }
+    };
 }
 
 async function fetchTasks() {
