@@ -23,11 +23,12 @@ BASE_DIR = Path(__file__).resolve().parent
 UPLOADS_DIR = BASE_DIR / "uploads"
 OUTPUT_DIR = BASE_DIR / "output"
 TEMP_DIR = BASE_DIR / "temp"
+ZENIUS_DIR = BASE_DIR / "zenius"
 FFDEC_DIR = BASE_DIR / "ffdec"
 FFDEC_JAR = FFDEC_DIR / "ffdec.jar"
 INSTANCE_DIR = BASE_DIR / "instance"
 
-for folder in [UPLOADS_DIR, OUTPUT_DIR, TEMP_DIR, FFDEC_DIR, INSTANCE_DIR]:
+for folder in [UPLOADS_DIR, OUTPUT_DIR, TEMP_DIR, ZENIUS_DIR, FFDEC_DIR, INSTANCE_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
@@ -224,9 +225,9 @@ def serve_folder_files(base_folder, subpath="", url_prefix=None):
         items = []
         try:
             for item in sorted(target_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-                # If viewing the root BASE_DIR, only include 'uploads', 'temp', and 'output'
+                # If viewing the root BASE_DIR, only include the known folders
                 if target_path == BASE_DIR.resolve():
-                    if item.name not in ["uploads", "temp", "output"]:
+                    if item.name not in ["uploads", "temp", "output", "zenius"]:
                         continue
 
                 rel_item = item.relative_to(base_folder)
@@ -284,6 +285,19 @@ def serve_folder_files(base_folder, subpath="", url_prefix=None):
         active_uploads = 'active' if folder_name == 'uploads' else ''
         active_temp = 'active' if folder_name == 'temp' else ''
         active_output = 'active' if folder_name == 'output' else ''
+        active_zenius = 'active' if folder_name == 'zenius' else ''
+
+        # Tombol "Konversi Terpilih" hanya muncul di dalam folder zenius, karena
+        # folder itulah yang dipakai sebagai sumber SWF untuk konversi lokal.
+        is_zenius = (base_folder.resolve() == ZENIUS_DIR.resolve())
+        convert_toolbar = ''
+        convert_header = ''
+        if is_zenius:
+            convert_header = '<th style="width: 100px; text-align: center;">Konversi</th>'
+            convert_toolbar = f'''
+        <button class="btn-action" style="background: var(--emerald); border-color: var(--emerald); color: white; padding: 8px 14px; font-weight: 600;" onclick="convertSelected()">
+            <i class="fa-solid fa-film"></i> Konversi Terpilih ke MP4
+        </button>'''
 
         html = f"""<!DOCTYPE html>
 <html lang="id">
@@ -378,6 +392,7 @@ def serve_folder_files(base_folder, subpath="", url_prefix=None):
             <a href="/uploads" class="nav-btn {active_uploads}"><i class="fa-solid fa-upload"></i> Uploads</a>
             <a href="/temp" class="nav-btn {active_temp}"><i class="fa-solid fa-clock-rotate-left"></i> Temp</a>
             <a href="/output" class="nav-btn {active_output}"><i class="fa-solid fa-circle-check"></i> Output</a>
+            <a href="/zenius" class="nav-btn {active_zenius}"><i class="fa-solid fa-bolt"></i> Zenius (SWF)</a>
         </div>
     </div>
 
@@ -409,7 +424,7 @@ def serve_folder_files(base_folder, subpath="", url_prefix=None):
             </button>
             <button class="btn-action" style="background: var(--primary); border-color: var(--primary); color: white; padding: 8px 14px; font-weight: 600;" onclick="compressSelectedItems()">
                 <i class="fa-solid fa-file-zipper"></i> Kompres (.zip)
-            </button>
+            </button>{convert_toolbar}
         </div>
     </div>
 
@@ -422,18 +437,20 @@ def serve_folder_files(base_folder, subpath="", url_prefix=None):
                     <th>Tipe</th>
                     <th>Ukuran</th>
                     <th>Modifikasi Terakhir</th>
-                    <th style="text-align: right;">Aksi</th>
+                    <th style="text-align: right;">Aksi</th>{convert_header}
                 </tr>
             </thead>
             <tbody id="fileTable">
 """
+        span_cols = 6 if is_zenius else 5
+
         if subpath:
             parent_subpath = "/".join(subpath.rstrip("/").split("/")[:-1])
             parent_link = f"{url_prefix}/{parent_subpath}" if parent_subpath else url_prefix
             html += f"""
                 <tr>
                     <td></td>
-                    <td colspan="5">
+                    <td colspan="{span_cols}">
                         <div class="file-item">
                             <i class="fa-solid fa-arrow-left text-amber"></i>
                             <a href="{parent_link}">.. (Kembali ke folder atas)</a>
@@ -445,7 +462,7 @@ def serve_folder_files(base_folder, subpath="", url_prefix=None):
         if not items:
             html += f"""
                 <tr>
-                    <td colspan="6" style="text-align: center; padding: 40px; color: var(--muted);">
+                    <td colspan="{span_cols + 1}" style="text-align: center; padding: 40px; color: var(--muted);">
                         <i class="fa-regular fa-folder-open" style="font-size: 2.5rem; margin-bottom: 12px; display: block;"></i>
                         Folder ini kosong.
                     </td>
@@ -470,6 +487,14 @@ def serve_folder_files(base_folder, subpath="", url_prefix=None):
 
             delete_btn = f'<button class="btn-action" style="border-color: #f43f5e; color: #f43f5e;" onclick="deleteSingleItem(\'{item["rel_path"]}\')"><i class="fa-solid fa-trash"></i></button>'
 
+            # Kolom konversi: hanya untuk file .swf di dalam folder zenius
+            convert_cell = ""
+            if is_zenius:
+                if not item["is_dir"] and item["ext"] == ".swf":
+                    convert_cell = f'<td style="text-align:center;"><button class="btn-action" style="background: var(--emerald); border-color: var(--emerald); color: white;" title="Konversi file ini ke MP4" onclick="convertItem(\'{item["rel_path"]}\')"><i class="fa-solid fa-play"></i></button></td>'
+                else:
+                    convert_cell = "<td></td>"
+
             html += f"""
                 <tr class="item-row" data-name="{item['name'].lower()}">
                     <td style="text-align: center;">
@@ -488,7 +513,7 @@ def serve_folder_files(base_folder, subpath="", url_prefix=None):
                         {preview_btn}
                         {download_btn}
                         {delete_btn}
-                    </td>
+                    </td>{convert_cell}
                 </tr>
             """
 
@@ -601,6 +626,45 @@ def serve_folder_files(base_folder, subpath="", url_prefix=None):
             }}
         }}
 
+        // Kirim file .swf terpilih ke antrean konversi di halaman utama
+        async function sendToConvert(items) {{
+            if (items.length === 0) {{
+                alert('Tidak ada file .swf yang dipilih. Hanya file .swf yang bisa dikonversi.');
+                return;
+            }}
+            try {{
+                const res = await fetch('/api/convert-local', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ items: items }})
+                }});
+                const data = await res.json();
+                if (data.success) {{
+                    window.location.href = '/';
+                }} else {{
+                    alert('Gagal memulai konversi: ' + (data.error || 'Terjadi kesalahan'));
+                }}
+            }} catch (e) {{
+                alert('Gagal menghubungi server.');
+            }}
+        }}
+
+        function convertItem(relPath) {{
+            sendToConvert([relPath]);
+        }}
+
+        function convertSelected() {{
+            // Hanya file .swf yang dikirim; folder diabaikan
+            const rows = document.querySelectorAll('.item-row');
+            const swf = [];
+            rows.forEach(row => {{
+                const cb = row.querySelector('.item-checkbox');
+                if (!cb || !cb.checked) return;
+                if (cb.value.toLowerCase().endsWith('.swf')) swf.push(cb.value);
+            }});
+            sendToConvert(swf);
+        }}
+
         function openPreview(url, category, name) {{
             const modal = document.getElementById('previewModal');
             const container = document.getElementById('modalContainer');
@@ -654,20 +718,73 @@ def serve_temp(subpath):
 def serve_output(subpath):
     return serve_folder_files(OUTPUT_DIR, subpath)
 
+@app.route("/zenius", defaults={"subpath": ""})
+@app.route("/zenius/<path:subpath>")
+def serve_zenius(subpath):
+    # Folder zenius: tempat menaruh file/folder .swf yang akan dikonversi
+    return serve_folder_files(ZENIUS_DIR, subpath)
+
+# Batas kedalaman penelusuran folder zenius, untuk mencegah rekursi tak
+# terkendali (mis. struktur folder yang sangat dalam / aneh).
+ZENIUS_SCAN_MAX_DEPTH = 12
+
+
+def scan_zenius_tree(directory, rel="", depth=0):
+    """
+    Telusuri folder zenius/ dan kembalikan struktur bersarang berisi HANYA
+    file .swf (folder kosong pun tetap ditampilkan agar strukturnya jelas).
+    Dipakai oleh modal pemilih file di halaman utama, sehingga pengguna tidak
+    perlu membuka File Manager terpisah untuk memilih file konversi.
+    """
+    node = {"name": directory.name, "path": rel, "files": [], "dirs": []}
+    if depth >= ZENIUS_SCAN_MAX_DEPTH:
+        return node
+
+    try:
+        entries = sorted(
+            os.scandir(directory),
+            key=lambda e: (not e.is_dir(follow_symlinks=False), e.name.lower())
+        )
+    except OSError:
+        return node
+
+    for entry in entries:
+        # Lewati symlink: mencegah penelusuran keluar dari folder zenius
+        if entry.is_symlink():
+            continue
+        child_rel = f"{rel}/{entry.name}" if rel else entry.name
+        if entry.is_dir(follow_symlinks=False):
+            node["dirs"].append(scan_zenius_tree(Path(entry.path), child_rel, depth + 1))
+        elif entry.name.lower().endswith(".swf") and entry.is_file(follow_symlinks=False):
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                size = 0
+            node["files"].append({"name": entry.name, "path": child_rel, "size": size})
+
+    return node
+
+
+@app.route("/api/zenius-scan", methods=["GET"])
+def zenius_scan():
+    """Daftar isi folder zenius/ (khusus .swf) untuk modal pemilih di beranda."""
+    return jsonify(scan_zenius_tree(ZENIUS_DIR))
+
 def resolve_allowed_path(folder_name, subpath):
     folder_map = {
         "uploads": UPLOADS_DIR,
         "temp": TEMP_DIR,
         "output": OUTPUT_DIR,
+        "zenius": ZENIUS_DIR,
         BASE_DIR.name: BASE_DIR
     }
     base = folder_map.get(folder_name)
     if not base:
         return None
-    
+
     target = (base / subpath).resolve()
-    # Security check: must be strictly inside allowed directories (UPLOADS_DIR, TEMP_DIR, OUTPUT_DIR)
-    allowed_roots = [UPLOADS_DIR.resolve(), TEMP_DIR.resolve(), OUTPUT_DIR.resolve()]
+    # Security check: must be strictly inside allowed directories
+    allowed_roots = [UPLOADS_DIR.resolve(), TEMP_DIR.resolve(), OUTPUT_DIR.resolve(), ZENIUS_DIR.resolve()]
     is_valid = any(str(target).startswith(str(root)) for root in allowed_roots)
     if not is_valid:
         return None
@@ -804,12 +921,14 @@ def purge_task(task_id):
         task = tasks.pop(task_id, None)
     if not task:
         return
-    upload_p = Path(task.get("upload_path", ""))
-    if upload_p.exists():
-        try:
-            os.remove(upload_p)
-        except Exception:
-            pass
+    # File sumber di folder zenius/ milik pengguna -> jangan dihapus.
+    if task.get("source") != "zenius":
+        upload_p = Path(task.get("upload_path", ""))
+        if upload_p.exists():
+            try:
+                os.remove(upload_p)
+            except Exception:
+                pass
     temp_p = TEMP_DIR / task_id
     if temp_p.exists():
         try:
@@ -1010,6 +1129,9 @@ def convert_swf_to_mp4(task_id):
         return
 
     input_swf = Path(task["upload_path"])
+    # File dari folder zenius/ harus dibiarkan di tempatnya; file hasil upload
+    # (di uploads/) dihapus setelah selesai supaya tidak menumpuk.
+    delete_input_after = task.get("source") != "zenius"
     # Simpan hasil ke output/<folder asal>/<nama file>.mp4
     output_mp4 = unique_path(build_output_path(task.get("rel_dir", ""), task["filename_stem"]))
     task["output_path"] = str(output_mp4)
@@ -1132,7 +1254,7 @@ def convert_swf_to_mp4(task_id):
             pass
 
         try:
-            if input_swf.exists():
+            if delete_input_after and input_swf.exists():
                 os.remove(input_swf)
         except Exception:
             pass
@@ -1232,6 +1354,95 @@ def upload_files():
 
     if not created_tasks:
         return jsonify({"error": "Tidak ada file .swf yang valid dalam pilihan tersebut"}), 400
+
+    return jsonify({"success": True, "count": len(created_tasks), "tasks": created_tasks})
+
+@app.route("/api/convert-local", methods=["POST"])
+def convert_local_files():
+    """
+    Konversi file .swf yang sudah ada di folder zenius/ tanpa upload.
+    File sumber TIDAK dihapus (berbeda dengan file hasil upload), karena file
+    tersebut milik pengguna dan berada di dalam folder proyek.
+    """
+    data = request.json or {}
+    items = data.get("items", [])
+    if not items:
+        return jsonify({"error": "Tidak ada file yang dipilih"}), 400
+
+    zenius_root = ZENIUS_DIR.resolve()
+    created_tasks = []
+    errors = []
+
+    for rel in items:
+        rel = str(rel).replace("\\", "/").strip()
+        # Tolak jalur absolut / berisi drive letter
+        if not rel or rel.startswith("/") or re.match(r"^[A-Za-z]:", rel):
+            errors.append(f"Jalur tidak valid: {rel}")
+            continue
+
+        raw_segs = [p for p in rel.split("/") if p not in ("", ".")]
+        # Tolak ".." secara eksplisit, jangan diam-diam dibuang
+        if not raw_segs or any(p == ".." for p in raw_segs):
+            errors.append(f"Jalur tidak valid: {rel}")
+            continue
+        segs = raw_segs
+
+        target = (ZENIUS_DIR / Path(*segs)).resolve()
+        # Pastikan hasil resolve tetap berada di dalam folder zenius
+        if target != zenius_root and zenius_root not in target.parents:
+            errors.append(f"Akses ditolak: {rel}")
+            continue
+        if not target.is_file():
+            errors.append(f"Bukan sebuah file: {rel}")
+            continue
+        if target.suffix.lower() != ".swf":
+            errors.append(f"Bukan file .swf: {rel}")
+            continue
+
+        # Jangan antre file yang sama dua kali selagi masih diproses
+        with tasks_lock:
+            already = any(
+                t.get("source") == "zenius"
+                and t.get("upload_path") == str(target)
+                and t["status"] not in TERMINAL_STATUSES
+                for t in tasks.values()
+            )
+        if already:
+            errors.append(f"Sudah ada dalam antrean: {rel}")
+            continue
+
+        stem = safe_folder_segment(target.stem)
+        rel_dir = "/".join(safe_folder_segment(p) for p in segs[:-1])
+
+        task_id = uuid.uuid4().hex[:10]
+        display_name = f"{rel_dir}/{target.name}" if rel_dir else target.name
+
+        task_data = {
+            "id": task_id,
+            "filename": display_name,
+            "filename_stem": stem,
+            "rel_dir": rel_dir,
+            "upload_path": str(target),
+            "source": "zenius",
+            "output_path": "",
+            "status": "pending",
+            "progress": 0,
+            "cancel_requested": False,
+            "logs": [f"[{time.strftime('%H:%M:%S')}] Konversi dari folder zenius: {display_name}"],
+            "error_message": "",
+            "file_size": target.stat().st_size,
+            "created_at": time.time(),
+            "completed_at": None,
+        }
+
+        with tasks_lock:
+            tasks[task_id] = task_data
+
+        created_tasks.append(task_data)
+        executor.submit(convert_swf_to_mp4, task_id)
+
+    if not created_tasks:
+        return jsonify({"error": "; ".join(errors) or "Tidak ada file .swf yang valid"}), 400
 
     return jsonify({"success": True, "count": len(created_tasks), "tasks": created_tasks})
 

@@ -3,9 +3,15 @@ let activeTasksMap = new Map();
 let currentLogTaskId = null;
 let eventSource = null;
 
+// State untuk modal pemilih file dari folder zenius/
+let zeniusTree = null;          // struktur folder hasil /api/zenius-scan
+let zeniusCurrentPath = '';     // folder yang sedang dibuka ('' = root zenius)
+let zeniusSelected = new Set(); // path file .swf yang dicentang (relatif ke zenius/)
+
 document.addEventListener('DOMContentLoaded', () => {
     checkEnvironment();
     setupDropzone();
+    setupZeniusPicker();
     initSSE();
 });
 
@@ -485,6 +491,266 @@ async function clearFinishedTasks() {
 // Download Zip
 function downloadAllZip() {
     window.location.href = '/api/download-all';
+}
+
+// ===========================================================================
+// Zenius Folder Picker
+// Pemilih file .swf langsung dari folder zenius/ di halaman utama, sehingga
+// pengguna tidak perlu membuka File Manager terpisah lalu menekan Konversi.
+// ===========================================================================
+
+function setupZeniusPicker() {
+    const modal = document.getElementById('zeniusModal');
+    if (!modal) return;
+    // Tutup modal saat area gelap di luar kartu diklik
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeZeniusPicker();
+    });
+    // Tutup dengan tombol Escape
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeZeniusPicker();
+    });
+}
+
+function openZeniusPicker() {
+    const modal = document.getElementById('zeniusModal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    loadZeniusTree();
+}
+
+function closeZeniusPicker() {
+    const modal = document.getElementById('zeniusModal');
+    if (modal) modal.classList.add('hidden');
+}
+
+// Muat ulang daftar file, tetap membuka folder yang sedang aktif
+function refreshZeniusPicker() {
+    loadZeniusTree(zeniusCurrentPath);
+}
+
+async function loadZeniusTree(keepPath = '') {
+    const listEl = document.getElementById('zeniusList');
+    listEl.innerHTML = '<div class="zenius-loading"><i class="fa-solid fa-spinner fa-spin"></i> Memuat daftar file...</div>';
+    try {
+        const res = await fetch('/api/zenius-scan');
+        if (res.status === 401) { window.location.href = '/login'; return; }
+        const data = await res.json();
+        zeniusTree = data;
+        // Kalau folder yang tersimpan sudah tidak ada lagi, kembali ke root
+        zeniusCurrentPath = findZeniusNode(keepPath) ? keepPath : '';
+        renderZeniusList();
+    } catch (e) {
+        listEl.innerHTML = '<div class="zenius-empty"><i class="fa-solid fa-triangle-exclamation"></i> Gagal memuat daftar folder zenius.</div>';
+        console.error('Zenius scan error:', e);
+    }
+}
+
+// Cari node folder berdasarkan path relatif (mis. "kursus/bab1")
+function findZeniusNode(path, node = zeniusTree) {
+    if (!node) return null;
+    if (!path) return node;
+    const segs = path.split('/').filter(Boolean);
+    let current = node;
+    for (const seg of segs) {
+        const next = (current.dirs || []).find(d => d.name === seg);
+        if (!next) return null;
+        current = next;
+    }
+    return current;
+}
+
+// Kumpulkan semua path file .swf di dalam sebuah node (termasuk subfolder)
+function collectZeniusFiles(node, out = []) {
+    if (!node) return out;
+    (node.files || []).forEach(f => out.push(f));
+    (node.dirs || []).forEach(d => collectZeniusFiles(d, out));
+    return out;
+}
+
+function renderZeniusList() {
+    const listEl = document.getElementById('zeniusList');
+    const node = findZeniusNode(zeniusCurrentPath);
+    if (!node) {
+        listEl.innerHTML = '<div class="zenius-empty"><i class="fa-regular fa-folder-open"></i> Folder tidak ditemukan.</div>';
+        return;
+    }
+
+    renderZeniusBreadcrumb(zeniusCurrentPath);
+
+    let html = '';
+
+    // Baris "kembali ke folder atas" bila tidak berada di root
+    if (zeniusCurrentPath) {
+        const parent = zeniusCurrentPath.split('/').filter(Boolean).slice(0, -1).join('/');
+        html += `
+            <div class="zenius-row dir" data-nav="${escapeHtml(parent)}">
+                <i class="fa-solid fa-arrow-left zenius-dir-icon"></i>
+                <span class="zenius-name">.. (Kembali ke folder atas)</span>
+            </div>`;
+    }
+
+    // Folder lebih dulu, lalu file
+    (node.dirs || []).forEach(dir => {
+        const fileCount = collectZeniusFiles(dir).length;
+        html += `
+            <div class="zenius-row dir" data-nav="${escapeHtml(dir.path || dir.name)}">
+                <i class="fa-solid fa-folder zenius-dir-icon"></i>
+                <span class="zenius-name">${escapeHtml(dir.name)}</span>
+                <span class="zenius-size">${fileCount} file .swf</span>
+                <button class="btn btn-sm btn-outline" data-select-folder="${escapeHtml(dir.path || dir.name)}" title="Pilih semua .swf di folder ini">
+                    <i class="fa-solid fa-check-double"></i>
+                </button>
+            </div>`;
+    });
+
+    (node.files || []).forEach(file => {
+        const checked = zeniusSelected.has(file.path) ? 'checked' : '';
+        html += `
+            <div class="zenius-row file" data-select-file="${escapeHtml(file.path)}">
+                <input type="checkbox" ${checked}>
+                <i class="fa-solid fa-file-video zenius-file-icon"></i>
+                <span class="zenius-name">${escapeHtml(file.name)}</span>
+                <span class="zenius-size">${formatBytes(file.size)}</span>
+            </div>`;
+    });
+
+    if (!html) {
+        listEl.innerHTML = '<div class="zenius-empty"><i class="fa-regular fa-folder-open"></i> Tidak ada file .swf di folder ini.<br>Tambahkan file ke folder <code>zenius/</code> lalu muat ulang.</div>';
+        updateZeniusSelectionInfo();
+        return;
+    }
+
+    listEl.innerHTML = html;
+
+    // Pasang handler lewat listener + data-* attribute (bukan onclick inline),
+    // supaya nama folder/file yang mengandung tanda kutip tetap aman.
+    listEl.querySelectorAll('[data-nav]').forEach(el => {
+        el.addEventListener('click', (e) => {
+            if (e.target.closest('button')) return; // tombol "pilih folder" jangan ikut navigasi
+            zeniusCurrentPath = el.getAttribute('data-nav');
+            renderZeniusList();
+        });
+    });
+
+    listEl.querySelectorAll('[data-select-folder]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            selectZeniusFolder(btn.getAttribute('data-select-folder'));
+        });
+    });
+
+    listEl.querySelectorAll('[data-select-file]').forEach(row => {
+        const path = row.getAttribute('data-select-file');
+        const checkbox = row.querySelector('input[type="checkbox"]');
+        checkbox.addEventListener('change', () => {
+            toggleZeniusFile(path, checkbox.checked);
+        });
+        // Klik area baris (selain checkbox) juga ikut mencentang
+        row.addEventListener('click', (e) => {
+            if (e.target === checkbox) return;
+            checkbox.checked = !checkbox.checked;
+            toggleZeniusFile(path, checkbox.checked);
+        });
+    });
+
+    // Sinkronkan "Pilih Semua", tombol konversi, dan info jumlah terpilih
+    updateZeniusSelectionInfo();
+}
+
+function renderZeniusBreadcrumb(path) {
+    const el = document.getElementById('zeniusBreadcrumb');
+    const parts = path.split('/').filter(Boolean);
+    let html = `<a data-crumb="">zenius</a>`;
+    let acc = '';
+    parts.forEach((part, i) => {
+        acc = acc ? `${acc}/${part}` : part;
+        html += `<span class="divider">/</span><a data-crumb="${escapeHtml(acc)}">${escapeHtml(part)}</a>`;
+    });
+    el.innerHTML = html;
+    el.querySelectorAll('[data-crumb]').forEach(a => {
+        a.addEventListener('click', () => {
+            zeniusCurrentPath = a.getAttribute('data-crumb');
+            renderZeniusList();
+        });
+    });
+}
+
+function toggleZeniusFile(path, isChecked) {
+    if (isChecked) zeniusSelected.add(path);
+    else zeniusSelected.delete(path);
+    updateZeniusSelectionInfo();
+}
+
+// Pilih / batalkan semua file .swf di dalam sebuah folder
+function selectZeniusFolder(folderPath) {
+    const node = findZeniusNode(folderPath);
+    const files = collectZeniusFiles(node);
+    if (files.length === 0) return;
+    const allSelected = files.every(f => zeniusSelected.has(f.path));
+    files.forEach(f => {
+        if (allSelected) zeniusSelected.delete(f.path);
+        else zeniusSelected.add(f.path);
+    });
+    renderZeniusList();
+    updateZeniusSelectionInfo();
+}
+
+function toggleZeniusSelectAll(master) {
+    const node = findZeniusNode(zeniusCurrentPath);
+    (node.files || []).forEach(f => {
+        if (master.checked) zeniusSelected.add(f.path);
+        else zeniusSelected.delete(f.path);
+    });
+    renderZeniusList();
+    updateZeniusSelectionInfo();
+}
+
+function updateZeniusSelectionInfo() {
+    const count = zeniusSelected.size;
+    document.getElementById('zeniusSelectionInfo').textContent = `${count} file dipilih`;
+    document.getElementById('zeniusConvertBtn').disabled = count === 0;
+    const master = document.getElementById('zeniusSelectAll');
+    if (master) {
+        const node = findZeniusNode(zeniusCurrentPath);
+        const files = (node && node.files) || [];
+        master.checked = files.length > 0 && files.every(f => zeniusSelected.has(f.path));
+    }
+}
+
+// Kirim file terpilih ke antrean konversi (endpoint /api/convert-local)
+async function submitZeniusConversion() {
+    const items = Array.from(zeniusSelected);
+    if (items.length === 0) return;
+
+    const btn = document.getElementById('zeniusConvertBtn');
+    btn.disabled = true;
+    const original = btn.innerHTML;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Memulai...';
+
+    try {
+        const res = await fetch('/api/convert-local', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items })
+        });
+        const data = await res.json();
+        if (data.success) {
+            zeniusSelected.clear();
+            closeZeniusPicker();
+            fetchTasks();
+            document.querySelector('.tasks-section')?.scrollIntoView({ behavior: 'smooth' });
+        } else {
+            alert('Gagal memulai konversi: ' + (data.error || 'Terjadi kesalahan'));
+        }
+    } catch (e) {
+        alert('Gagal menghubungi server.');
+        console.error('Zenius convert error:', e);
+    } finally {
+        btn.disabled = zeniusSelected.size === 0;
+        btn.innerHTML = original;
+        updateZeniusSelectionInfo();
+    }
 }
 
 // Helpers
