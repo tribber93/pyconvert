@@ -48,18 +48,23 @@
             <section class="dropzone-section">
                 <div class="dropzone" id="dropzone">
                     <input type="file" id="fileInput" multiple accept=".swf" class="file-input">
+                    <input type="file" id="folderInput" multiple accept=".swf" webkitdirectory directory class="file-input">
                     <div class="dropzone-content">
                         <div class="dropzone-icon">
                             <i class="fa-solid fa-cloud-arrow-up"></i>
                         </div>
-                        <h3>Tarik & Lepas File <span>.SWF</span> Di Sini</h3>
-                        <p>Atau klik untuk memilih multiple file SWF dari komputer Anda</p>
+                        <h3>Tarik & Lepas File / Folder <span>.SWF</span> Di Sini</h3>
+                        <p>Atau klik untuk memilih file atau folder SWF dari komputer Anda</p>
                         <div class="upload-btn-container">
                             <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
                                 <i class="fa-solid fa-folder-open"></i> Pilih File SWF
                             </button>
+                            <button class="btn btn-outline" onclick="document.getElementById('folderInput').click()">
+                                <i class="fa-solid fa-folder-tree"></i> Pilih Folder
+                            </button>
                         </div>
                         <span class="file-hint"><i class="fa-solid fa-layer-group"></i> Mendukung konversi banyak file sekaligus (Batch Processing)</span>
+                        <span class="file-hint"><i class="fa-solid fa-folder-tree"></i> Hasil MP4 disimpan di <strong>output/&lt;nama folder&gt;/</strong> mengikuti folder asal</span>
                     </div>
                 </div>
 

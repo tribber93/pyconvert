@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import glob
 import json
@@ -26,6 +27,60 @@ for folder in [UPLOADS_DIR, OUTPUT_DIR, TEMP_DIR, FFDEC_DIR]:
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max upload limit
+
+_ILLEGAL_NAME_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
+_RESERVED_WIN_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *[f"COM{i}" for i in range(1, 10)],
+    *[f"LPT{i}" for i in range(1, 10)],
+}
+
+
+def safe_folder_segment(name):
+    """
+    Bersihkan satu segmen nama folder/file dari path traversal & karakter ilegal,
+    tapi tetap mempertahankan spasi dan karakter non-ASCII supaya nama folder asli
+    tidak berubah (secure_filename akan mengubah 'Kursus IPA' jadi 'Kursus_IPA').
+    """
+    name = str(name).replace("\\", "/").split("/")[-1].strip()
+    name = _ILLEGAL_NAME_CHARS.sub("_", name)
+    # Windows tidak mengizinkan nama berakhir dengan titik/spasi
+    name = name.rstrip(" .")
+    if not name or name in (".", ".."):
+        return "folder"
+    if name.split(".")[0].upper() in _RESERVED_WIN_NAMES:
+        name = f"_{name}"
+    return name
+
+
+def build_output_path(folder_rel, stem):
+    """
+    Tentukan lokasi file MP4 hasil konversi.
+    folder_rel: folder relatif (relatif ke uploads/) tempat SWF berasal, mis. "kursus_ipa/bab1".
+                Kosong berarti file diupload langsung (tanpa folder).
+    Hasil: output/<folder_rel>/<stem>.mp4 — jadi file dari sebuah folder
+           dikeluarkan ke folder dengan nama yang sama di dalam output/.
+    """
+    out_dir = OUTPUT_DIR
+    if folder_rel:
+        for seg in folder_rel.split("/"):
+            seg = safe_folder_segment(seg)
+            if seg:
+                out_dir = out_dir / seg
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / f"{safe_folder_segment(stem)}.mp4"
+
+
+def unique_path(path):
+    """Hindari menimpa file lama dengan menambahkan sufiks _1, _2, dst."""
+    if not path.exists():
+        return path
+    for i in range(1, 10000):
+        candidate = path.with_name(f"{path.stem}_{i}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    return path
+
 
 # Helper to serve static folder contents with a modern File Manager UI
 def serve_folder_files(base_folder, subpath="", url_prefix=None):
@@ -609,6 +664,121 @@ tasks = {}
 # supaya tidak ada beberapa Java/FFmpeg yang berebut CPU & memori sekaligus.
 executor = ThreadPoolExecutor(max_workers=1)
 
+# Registry proses yang sedang berjalan per task, dipakai untuk membatalkan.
+# Disimpan TERPISAH dari dict 'tasks' karena /api/tasks men-jsonify seluruh isi
+# tasks; objek Popen tidak bisa diserialisasi ke JSON.
+running_procs = {}
+running_procs_lock = threading.Lock()
+
+# Status khusus "dibatalkan". Hanya status ini (dan completed/error) yang
+# menyimpan completed_at, supaya task yang dibatalkan tercatat selesai.
+TERMINAL_STATUSES = {"completed", "error", "cancelled"}
+
+
+class ConversionCancelled(Exception):
+    """Dilempar saat konversi dihentikan karena permintaan pembatalan pengguna."""
+
+
+def register_process(task_id, process):
+    """Tautkan proses Popen aktif ke sebuah task (untuk pembatalan)."""
+    with running_procs_lock:
+        running_procs[task_id] = process
+
+
+def unregister_process(task_id):
+    with running_procs_lock:
+        running_procs.pop(task_id, None)
+
+
+def purge_task(task_id):
+    """
+    Hapus task dari daftar konversi beserta file sementaranya.
+    Dipakai saat task dibatalkan, supaya task yang dibatalkan tidak menumpuk
+    di daftar. Aman dipanggil berkali-kali.
+    """
+    with tasks_lock:
+        task = tasks.pop(task_id, None)
+    if not task:
+        return
+    upload_p = Path(task.get("upload_path", ""))
+    if upload_p.exists():
+        try:
+            os.remove(upload_p)
+        except Exception:
+            pass
+    temp_p = TEMP_DIR / task_id
+    if temp_p.exists():
+        try:
+            shutil.rmtree(temp_p, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def request_cancel(task_id):
+    """
+    Minta konversi dibatalkan, lalu buang task dari daftar.
+    - Jika proses sedang berjalan: matikan proses beserta anak-anaknya
+      (Java/FFmpeg) lewat taskkill. Task baru dihapus dari daftar setelah
+      prosesnya benar-benar berhenti (lihat convert_swf_to_mp4).
+    - Jika masih menunggu di antrean: langsung dihapus dari daftar.
+    Return nilai status task setelah permintaan ('cancelled' / 'cancelling').
+    """
+    with tasks_lock:
+        task = tasks.get(task_id)
+        if not task:
+            return None
+        if task["status"] in TERMINAL_STATUSES:
+            return task["status"]  # sudah selesai/gagal, tidak perlu apa-apa
+        task["cancel_requested"] = True
+
+    with running_procs_lock:
+        process = running_procs.get(task_id)
+
+    if process is None:
+        # Belum mulai (masih antre) -> langsung buang dari daftar
+        purge_task(task_id)
+        return "cancelled"
+
+    # Proses sedang berjalan -> hentikan paksa seluruh proses anaknya
+    kill_process_tree(process)
+    with tasks_lock:
+        if task_id in tasks:
+            tasks[task_id]["logs"].append(
+                f"[{time.strftime('%H:%M:%S')}] Permintaan batal diterima, menghentikan proses..."
+            )
+    return "cancelling"
+
+
+def kill_process_tree(process):
+    """Matikan sebuah proses beserta seluruh child process-nya (java/ffmpeg)."""
+    try:
+        if process.poll() is not None:
+            return  # sudah berhenti sendiri
+        if os.name == "nt":
+            # /T = seluruh pohon proses, /F = paksa
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        else:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def cancelled(task_id):
+    """True bila konversi task ini diminta berhenti."""
+    with tasks_lock:
+        return bool(tasks.get(task_id, {}).get("cancel_requested"))
+
+
 def check_environment():
     """Check availability of Java, FFmpeg, and FFDec jar."""
     java_ok = False
@@ -648,18 +818,28 @@ def add_log(task_id, message):
 def update_task_status(task_id, status=None, progress=None, error_message=None):
     """Update task status and progress."""
     with tasks_lock:
-        if task_id in tasks:
+        task = tasks.get(task_id)
+        if task is not None:
+            # Jangan timpa status terminal yang sudah tercapai (mis. task yang
+            # baru dibatalkan) kecuali memang diminta secara eksplisit.
+            if task["status"] == "cancelled" and task.get("cancel_requested"):
+                return
             if status is not None:
-                tasks[task_id]["status"] = status
+                task["status"] = status
             if progress is not None:
-                tasks[task_id]["progress"] = progress
+                task["progress"] = progress
             if error_message is not None:
-                tasks[task_id]["error_message"] = error_message
-            if status in ["completed", "error"]:
-                tasks[task_id]["completed_at"] = time.time()
+                task["error_message"] = error_message
+            if status in TERMINAL_STATUSES:
+                task["completed_at"] = time.time()
 
-def run_command_with_logging(cmd, task_id, cwd=None):
-    """Execute command and stream output line by line into task logs."""
+def run_command_with_logging(task, cmd, cwd=None):
+    """
+    Execute command and stream output line by line into task logs.
+    Menerima dict task (bukan task_id) agar bisa mengecek permintaan batal.
+    Mengembalikan exit code; -1 berarti proses dihentikan karena dibatalkan.
+    """
+    task_id = task["id"]
     add_log(task_id, f"Running command: {' '.join(cmd)}")
     process = subprocess.Popen(
         cmd,
@@ -670,15 +850,45 @@ def run_command_with_logging(cmd, task_id, cwd=None):
         universal_newlines=True,
         cwd=cwd
     )
+    register_process(task_id, process)
 
-    for line in iter(process.stdout.readline, ''):
-        if line:
-            clean_line = line.strip()
-            if clean_line:
-                add_log(task_id, clean_line)
+    # Watchdog: beberapa proses (mis. Java saat startup) bisa tidak mengeluarkan
+    # output sama sekali, sehingga pemeriksaan per-baris di bawah tidak pernah
+    # jalan. Thread ini memastikan permintaan batal tetap dieksekusi.
+    stop_watchdog = threading.Event()
 
-    process.stdout.close()
+    def watch_cancel():
+        while not stop_watchdog.wait(0.25):
+            if cancelled(task_id):
+                kill_process_tree(process)
+                return
+
+    watchdog = threading.Thread(target=watch_cancel, daemon=True)
+    watchdog.start()
+
+    try:
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                clean_line = line.strip()
+                if clean_line:
+                    add_log(task_id, clean_line)
+            if cancelled(task_id):
+                kill_process_tree(process)
+                break
+    finally:
+        stop_watchdog.set()
+        try:
+            process.stdout.close()
+        except Exception:
+            pass
+
     return_code = process.wait()
+    unregister_process(task_id)
+
+    if cancelled(task_id):
+        add_log(task_id, "Proses dihentikan karena pembatalan.")
+        return -1
+
     return return_code
 
 def convert_swf_to_mp4(task_id):
@@ -696,13 +906,18 @@ def convert_swf_to_mp4(task_id):
         return
 
     input_swf = Path(task["upload_path"])
-    stem = input_swf.stem
-    output_mp4 = OUTPUT_DIR / f"{task_id}_{secure_filename(task['filename_stem'])}.mp4"
+    # Simpan hasil ke output/<folder asal>/<nama file>.mp4
+    output_mp4 = unique_path(build_output_path(task.get("rel_dir", ""), task["filename_stem"]))
     task["output_path"] = str(output_mp4)
 
     task_temp_dir = TEMP_DIR / task_id
     avi_out_dir = task_temp_dir / "avi_out"
     sound_out_dir = task_temp_dir / "sound_out"
+
+    # Hanya True bila konversi benar-benar dihentikan di tengah jalan. Dipakai
+    # untuk menghapus MP4 setengah jadi; tidak memakai flag cancel_requested
+    # mentah karena task yang sudah selesai bisa saja baru saja diklik Batal.
+    was_cancelled = False
 
     try:
         task_temp_dir.mkdir(parents=True, exist_ok=True)
@@ -715,27 +930,31 @@ def convert_swf_to_mp4(task_id):
         # STEP 1: Export frames to AVI
         update_task_status(task_id, status="exporting_frames", progress=15)
         add_log(task_id, "=== TAHAP 1: Ekstraksi Frame SWF ke AVI ===")
-        
+
         cmd_frames = [
             "java", "-jar", str(FFDEC_JAR),
             "-format", "frame:avi",
             "-export", "frame", str(avi_out_dir),
             str(input_swf)
         ]
-        ret_frames = run_command_with_logging(cmd_frames, task_id)
+        ret_frames = run_command_with_logging(task, cmd_frames)
+        if cancelled(task_id):
+            raise ConversionCancelled()
         if ret_frames != 0:
             add_log(task_id, f"Peringatan: FFDec frame export return code: {ret_frames}")
 
         # STEP 2: Export sound
         update_task_status(task_id, status="exporting_sound", progress=45)
         add_log(task_id, "=== TAHAP 2: Ekstraksi Suara/Audio SWF ===")
-        
+
         cmd_sound = [
             "java", "-jar", str(FFDEC_JAR),
             "-export", "sound", str(sound_out_dir),
             str(input_swf)
         ]
-        ret_sound = run_command_with_logging(cmd_sound, task_id)
+        ret_sound = run_command_with_logging(task, cmd_sound)
+        if cancelled(task_id):
+            raise ConversionCancelled()
         if ret_sound != 0:
             add_log(task_id, f"Peringatan: FFDec sound export return code: {ret_sound}")
 
@@ -776,32 +995,49 @@ def convert_swf_to_mp4(task_id):
 
         cmd_ffmpeg.append(str(output_mp4))
 
-        ret_ffmpeg = run_command_with_logging(cmd_ffmpeg, task_id)
+        ret_ffmpeg = run_command_with_logging(task, cmd_ffmpeg)
+        if cancelled(task_id):
+            raise ConversionCancelled()
         if ret_ffmpeg != 0 or not output_mp4.exists():
             raise RuntimeError(f"FFmpeg gagal mengkonversi file (Exit Code: {ret_ffmpeg})")
 
         add_log(task_id, "=== KONVERSI BERHASIL DILAKUKAN! ===")
         update_task_status(task_id, status="completed", progress=100)
 
+    except ConversionCancelled:
+        was_cancelled = True
+        update_task_status(task_id, status="cancelled")
     except Exception as e:
         error_msg = str(e)
         add_log(task_id, f"ERROR: {error_msg}")
         update_task_status(task_id, status="error", error_message=error_msg)
     finally:
+        unregister_process(task_id)
+        # Hapus hasil MP4 setengah jadi bila proses dibatalkan di tengah jalan
+        if was_cancelled:
+            try:
+                if output_mp4.exists():
+                    output_mp4.unlink()
+            except Exception:
+                pass
         # Cleanup temp folder and uploaded swf file
         try:
             if task_temp_dir.exists():
                 shutil.rmtree(task_temp_dir, ignore_errors=True)
-                add_log(task_id, "Folder temp berhasil dibersihkan.")
-        except Exception as e:
-            add_log(task_id, f"Gagal menghapus temp directory: {e}")
+        except Exception:
+            pass
 
         try:
             if input_swf.exists():
                 os.remove(input_swf)
-                add_log(task_id, "File upload SWF berhasil dihapus.")
-        except Exception as e:
-            add_log(task_id, f"Gagal menghapus file upload SWF: {e}")
+        except Exception:
+            pass
+
+        # Task yang dibatalkan langsung dibuang dari daftar (beserta file
+        # sementaranya). Dilakukan setelah proses benar-benar berhenti dan
+        # semua handle file ditutup, supaya aman di Windows.
+        if was_cancelled:
+            purge_task(task_id)
 
 @app.route("/")
 def index():
@@ -820,36 +1056,62 @@ def upload_files():
     if not uploaded_files:
         return jsonify({"error": "File kosong"}), 400
 
+    # Jalur relatif tiap file (dikirim browser saat upload folder), mis. "folder/sub/a.swf"
+    rel_paths = request.form.getlist("paths") or request.form.getlist("paths[]")
+
     created_tasks = []
 
-    for file in uploaded_files:
+    for idx, file in enumerate(uploaded_files):
         if not file.filename:
             continue
-        
-        orig_filename = secure_filename(file.filename)
-        if not orig_filename.lower().endswith(".swf"):
-            # Allow fallback if secure_filename stripped it or original has .swf
-            if not file.filename.lower().endswith(".swf"):
-                continue
-            orig_filename = file.filename
+
+        raw_name = rel_paths[idx] if idx < len(rel_paths) and rel_paths[idx] else file.filename
+
+        # Pisahkan folder dari nama file; normalkan pemisah path Windows
+        parts = str(raw_name).replace("\\", "/").split("/")
+        parts = [p for p in parts if p and p not in (".", "..")]
+        if not parts:
+            continue
+        # Abaikan segmen atas hasil drag folder (kadang berisi nama folder root)
+        raw_filename = parts[-1]
+
+        if not raw_filename.lower().endswith(".swf"):
+            continue
+
+        # Nama file asli dipertahankan (spasi & non-ASCII tetap utuh) untuk
+        # tampilan UI dan penamaan output; hanya karakter ilegal yang dibersihkan.
+        orig_filename = safe_folder_segment(raw_filename)
+        stem = Path(orig_filename).stem
+        if not stem:
+            continue
+
+        # Folder asal (tanpa nama file), dibersihkan tiap segmennya
+        rel_dir = "/".join(s for s in (safe_folder_segment(p) for p in parts[:-1]) if s)
 
         task_id = uuid.uuid4().hex[:10]
-        stem = Path(orig_filename).stem
-        save_name = f"{task_id}_{orig_filename}"
+        # File disimpan datar di uploads/ dengan nama ASCII (aman untuk CLI
+        # Java/FFmpeg) dan awalan task_id agar unik; struktur folder asli cukup
+        # disimpan di rel_dir lalu dipakai untuk menentukan folder output.
+        disk_stem = secure_filename(stem) or "file"
+        save_name = f"{task_id}_{disk_stem}.swf"
         save_path = UPLOADS_DIR / save_name
 
         file.save(str(save_path))
         file_size = save_path.stat().st_size
 
+        display_name = f"{rel_dir}/{orig_filename}" if rel_dir else orig_filename
+
         task_data = {
             "id": task_id,
-            "filename": file.filename,
+            "filename": display_name,
             "filename_stem": stem,
+            "rel_dir": rel_dir,
             "upload_path": str(save_path),
             "output_path": "",
             "status": "pending",
             "progress": 0,
-            "logs": [f"[{time.strftime('%H:%M:%S')}] File {file.filename} berhasil diunggah."],
+            "cancel_requested": False,
+            "logs": [f"[{time.strftime('%H:%M:%S')}] File {display_name} berhasil diunggah."],
             "error_message": "",
             "file_size": file_size,
             "created_at": time.time(),
@@ -863,6 +1125,9 @@ def upload_files():
 
         # Submit background task to pool
         executor.submit(convert_swf_to_mp4, task_id)
+
+    if not created_tasks:
+        return jsonify({"error": "Tidak ada file .swf yang valid dalam pilihan tersebut"}), 400
 
     return jsonify({"success": True, "count": len(created_tasks), "tasks": created_tasks})
 
@@ -915,7 +1180,14 @@ def download_all_zip():
     with tasks_lock:
         for t in tasks.values():
             if t["status"] == "completed" and t["output_path"] and Path(t["output_path"]).exists():
-                completed_files.append((Path(t["output_path"]), f"{t['filename_stem']}.mp4"))
+                out_path = Path(t["output_path"])
+                # Pakai jalur nyata relatif terhadap OUTPUT_DIR supaya struktur
+                # folder asal ikut terbawa dan nama tetap unik (mis. a.mp4, a_1.mp4).
+                try:
+                    arc = str(out_path.relative_to(OUTPUT_DIR))
+                except ValueError:
+                    arc = out_path.name
+                completed_files.append((out_path, arc))
 
     if not completed_files:
         return jsonify({"error": "Belum ada file yang selesai dikonversi."}), 400
@@ -927,17 +1199,33 @@ def download_all_zip():
 
     return send_file(str(zip_filename), as_attachment=True, download_name="converted_mp4_batch.zip")
 
+@app.route("/api/cancel/<task_id>", methods=["POST"])
+def cancel_task(task_id):
+    """Hentikan konversi yang sedang berjalan / masih mengantre."""
+    result = request_cancel(task_id)
+    if result is None:
+        return jsonify({"error": "Task tidak ditemukan"}), 404
+    return jsonify({"success": True, "status": result})
+
 @app.route("/api/retry/<task_id>", methods=["POST"])
 def retry_task(task_id):
     with tasks_lock:
         task = tasks.get(task_id)
         if not task:
             return jsonify({"error": "Task tidak ditemukan"}), 404
-        
+
+        # Hanya boleh diulang dari status akhir. Proses yang masih berjalan harus
+        # dibatalkan dulu lewat /api/cancel supaya tidak ada dua proses menulis
+        # ke file output yang sama.
+        if task["status"] not in TERMINAL_STATUSES:
+            return jsonify({"error": "Hentikan proses terlebih dahulu sebelum mengulang"}), 409
+
         task["status"] = "pending"
         task["progress"] = 0
-        task["logs"].append(f"[{time.strftime('%H:%M:%S')}] Mencoba ulang proses konversi...")
+        task["cancel_requested"] = False
         task["error_message"] = ""
+        task["completed_at"] = None
+        task["logs"].append(f"[{time.strftime('%H:%M:%S')}] Mencoba ulang proses konversi...")
 
     executor.submit(convert_swf_to_mp4, task_id)
     return jsonify({"success": True})
@@ -946,7 +1234,7 @@ def retry_task(task_id):
 def clear_tasks():
     global tasks
     with tasks_lock:
-        to_delete_ids = [k for k, v in tasks.items() if v["status"] in ["completed", "error"]]
+        to_delete_ids = [k for k, v in tasks.items() if v["status"] in TERMINAL_STATUSES]
         for task_id in to_delete_ids:
             task = tasks[task_id]
             # Clean up upload file if still exists

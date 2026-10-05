@@ -159,6 +159,13 @@ body {
     display: none;
 }
 
+.upload-btn-container {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
 .dropzone-icon {
     font-size: 48px;
     color: var(--accent-violet);
@@ -467,6 +474,12 @@ body {
     background: rgba(244, 63, 94, 0.15);
     color: var(--accent-rose);
     border: 1px solid rgba(244, 63, 94, 0.3);
+}
+
+.status-cancelled, .status-cancelling {
+    background: rgba(148, 163, 184, 0.15);
+    color: var(--text-muted);
+    border: 1px solid rgba(148, 163, 184, 0.35);
 }
 
 .task-body {

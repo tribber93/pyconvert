@@ -52,26 +52,100 @@ function setupDropzone() {
         dropzone.addEventListener(eventName, () => dropzone.classList.remove('dragover'), false);
     });
 
-    dropzone.addEventListener('drop', (e) => {
+    dropzone.addEventListener('drop', async (e) => {
         const dt = e.dataTransfer;
-        const files = dt.files;
-        handleSelectedFiles(files);
+
+        // Ambil entry secara sinkron (setelah await, objek item tidak valid lagi)
+        const entries = dt.items
+            ? Array.from(dt.items)
+                .filter(it => it.kind === 'file')
+                .map(it => it.webkitGetAsEntry ? it.webkitGetAsEntry() : null)
+                .filter(Boolean)
+            : [];
+
+        if (entries.length > 0) {
+            // Tarik-lepas folder: telusuri isinya supaya struktur folder ikut terbawa
+            const collected = [];
+            for (const entry of entries) {
+                await walkEntry(entry, '', collected);
+            }
+            handleStagedItems(collected);
+        } else {
+            // Fallback browser lama: hanya file, tanpa struktur folder
+            handleSelectedFiles(dt.files);
+        }
     });
 
     fileInput.addEventListener('change', (e) => {
         handleSelectedFiles(e.target.files);
     });
+
+    // Upload folder (webkitdirectory)
+    const folderInput = document.getElementById('folderInput');
+    if (folderInput) {
+        folderInput.addEventListener('change', (e) => {
+            handleSelectedFiles(e.target.files);
+        });
+    }
+}
+
+// Ambil jalur relatif sebuah File dari atribut webkitRelativePath (kosong jika bukan dari folder)
+function getRelPath(file) {
+    const rel = file.webkitRelativePath || '';
+    return rel ? rel.replace(/\\/g, '/') : file.name;
+}
+
+// Telusuri DataTransferItem entry secara rekursif; hasil: [{file, relPath}]
+function walkEntry(entry, prefix, out) {
+    return new Promise((resolve) => {
+        if (entry.isFile) {
+            entry.file(file => {
+                out.push({ file, relPath: prefix ? `${prefix}/${file.name}` : file.name });
+                resolve();
+            }, () => resolve());
+        } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            const dirPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
+            const readBatch = () => {
+                reader.readEntries(async (batch) => {
+                    if (batch.length === 0) { resolve(); return; }
+                    for (const child of batch) {
+                        await walkEntry(child, dirPrefix, out);
+                    }
+                    readBatch(); // readEntries memanggil balik per batch, bukan sekaligus
+                }, () => resolve());
+            };
+            readBatch();
+        } else {
+            resolve();
+        }
+    });
 }
 
 function handleSelectedFiles(files) {
     const swfFiles = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.swf'));
-    
-    if (swfFiles.length === 0) {
+    handleStagedItems(swfFiles.map(file => ({ file, relPath: getRelPath(file) })));
+}
+
+// Staging bersama untuk pemilihan file/folder (via input) maupun tarik-lepas
+function handleStagedItems(items) {
+    const swfItems = items.filter(it => it.file.name.toLowerCase().endsWith('.swf'));
+
+    if (swfItems.length === 0) {
         alert('Harap pilih file dengan ekstensi .swf!');
         return;
     }
 
-    stagedFiles = [...stagedFiles, ...swfFiles];
+    // Hindari duplikat: folder yang sama bisa dipilih dua kali
+    const existing = new Set(stagedFiles.map(s => `${s.relPath}|${s.file.size}`));
+    swfItems.forEach(({ file, relPath }) => {
+        const key = `${relPath}|${file.size}`;
+        if (!existing.has(key)) {
+            existing.add(key);
+            stagedFiles.push({ file, relPath });
+        }
+    });
+
     renderStagedFiles();
 }
 
@@ -88,11 +162,11 @@ function renderStagedFiles() {
     panel.classList.remove('hidden');
     countEl.textContent = stagedFiles.length;
 
-    listEl.innerHTML = stagedFiles.map((file, idx) => `
-        <div class="staged-chip">
+    listEl.innerHTML = stagedFiles.map((item, idx) => `
+        <div class="staged-chip" title="${escapeHtml(item.relPath)}">
             <i class="fa-solid fa-file-video"></i>
-            <span>${file.name}</span>
-            <small>(${formatBytes(file.size)})</small>
+            <span>${escapeHtml(item.relPath)}</span>
+            <small>(${formatBytes(item.file.size)})</small>
             <span style="cursor:pointer; margin-left:6px; color:#f43f5e;" onclick="removeStagedFile(${idx})">&times;</span>
         </div>
     `).join('');
@@ -106,6 +180,8 @@ function removeStagedFile(index) {
 function clearStagedFiles() {
     stagedFiles = [];
     document.getElementById('fileInput').value = '';
+    const folderInput = document.getElementById('folderInput');
+    if (folderInput) folderInput.value = '';
     renderStagedFiles();
 }
 
@@ -118,8 +194,9 @@ async function uploadStagedFiles() {
     startBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Mengunggah...';
 
     const formData = new FormData();
-    stagedFiles.forEach(file => {
-        formData.append('files[]', file);
+    stagedFiles.forEach(item => {
+        formData.append('files[]', item.file, item.file.name);
+        formData.append('paths[]', item.relPath);
     });
 
     try {
@@ -248,6 +325,11 @@ function renderTasksGrid(taskList) {
                                 <i class="fa-solid fa-download"></i> Unduh MP4
                             </a>
                         ` : ''}
+                        ${isActive(task.status) ? `
+                            <button class="btn btn-sm btn-outline" style="border-color:#f43f5e; color:#f43f5e;" onclick="cancelTask('${task.id}')">
+                                <i class="fa-solid fa-circle-stop"></i> Batalkan
+                            </button>
+                        ` : ''}
                         ${task.status === 'error' ? `
                             <button class="btn btn-sm btn-outline" style="border-color:#f43f5e; color:#f43f5e;" onclick="retryTask('${task.id}')">
                                 <i class="fa-solid fa-rotate-right"></i> Coba Lagi
@@ -267,9 +349,9 @@ function updateGlobalProgress(taskList) {
         return;
     }
 
-    const completed = taskList.filter(t => t.status === 'completed' || t.status === 'error').length;
+    const completed = taskList.filter(t => isTerminal(t.status)).length;
     const total = taskList.length;
-    const isRunning = taskList.some(t => t.status !== 'completed' && t.status !== 'error');
+    const isRunning = taskList.some(t => !isTerminal(t.status));
 
     if (isRunning) {
         card.classList.remove('hidden');
@@ -291,6 +373,8 @@ function getStatusLabel(status) {
         case 'encoding_mp4': return 'Tahap 3: Encoding MP4 (FFmpeg)';
         case 'completed': return 'Selesai';
         case 'error': return 'Gagal';
+        case 'cancelled': return 'Dibatalkan';
+        case 'cancelling': return 'Menghentikan...';
         default: return status;
     }
 }
@@ -346,10 +430,25 @@ function closeVideoModal() {
     document.getElementById('videoModal').classList.add('hidden');
 }
 
+// Batalkan task yang sedang berjalan / mengantre
+async function cancelTask(taskId) {
+    if (!confirm('Hentikan proses konversi file ini?')) return;
+    try {
+        await fetch(`/api/cancel/${taskId}`, { method: 'POST' });
+        fetchTasks();
+    } catch (e) {
+        console.error('Cancel error:', e);
+    }
+}
+
 // Retry Task
 async function retryTask(taskId) {
     try {
-        await fetch(`/api/retry/${taskId}`, { method: 'POST' });
+        const res = await fetch(`/api/retry/${taskId}`, { method: 'POST' });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            alert(data.error || 'Gagal mengulang proses.');
+        }
         fetchTasks();
     } catch (e) {
         console.error('Retry error:', e);
@@ -372,6 +471,15 @@ function downloadAllZip() {
 }
 
 // Helpers
+function isTerminal(status) {
+    return status === 'completed' || status === 'error' || status === 'cancelled';
+}
+
+// Task yang masih berjalan atau menunggu (bisa dibatalkan)
+function isActive(status) {
+    return !isTerminal(status);
+}
+
 function formatBytes(bytes, decimals = 2) {
     if (!bytes || bytes === 0) return '0 Bytes';
     const k = 1024;
