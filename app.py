@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, stream_with_context
 from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,6 +26,567 @@ for folder in [UPLOADS_DIR, OUTPUT_DIR, TEMP_DIR, FFDEC_DIR]:
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max upload limit
+
+# Helper to serve static folder contents with a modern File Manager UI
+def serve_folder_files(base_folder, subpath="", url_prefix=None):
+    # url_prefix is the URL mount for this folder; defaults to /<folder name>
+    if url_prefix is None:
+        url_prefix = f"/{base_folder.name}"
+    # Allow optional preview parameter e.g. ?raw=true
+    is_raw = request.args.get("raw") == "true"
+    target_path = (base_folder / subpath).resolve()
+    if not str(target_path).startswith(str(base_folder.resolve())):
+        return "Akses ditolak", 403
+
+    if target_path.is_file():
+        if is_raw or request.args.get("download") != "true":
+            # Serve for viewing or streaming
+            ext = target_path.suffix.lower()
+            mimetypes = {
+                ".mp4": "video/mp4",
+                ".avi": "video/x-msvideo",
+                ".mp3": "audio/mpeg",
+                ".wav": "audio/wav",
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".gif": "image/gif",
+                ".swf": "application/x-shockwave-flash",
+                ".json": "application/json",
+                ".txt": "text/plain",
+                ".log": "text/plain"
+            }
+            mtype = mimetypes.get(ext)
+            return send_from_directory(target_path.parent, target_path.name, mimetype=mtype)
+        else:
+            return send_from_directory(target_path.parent, target_path.name, as_attachment=True)
+    
+    elif target_path.is_dir():
+        items = []
+        try:
+            for item in sorted(target_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                # If viewing the root BASE_DIR, only include 'uploads', 'temp', and 'output'
+                if target_path == BASE_DIR.resolve():
+                    if item.name not in ["uploads", "temp", "output"]:
+                        continue
+
+                rel_item = item.relative_to(base_folder)
+                size_bytes = item.stat().st_size if item.is_file() else 0
+                
+                # Determine icon & type category
+                ext = item.suffix.lower()
+                category = "folder" if item.is_dir() else "file"
+                icon = "fa-folder text-amber" if item.is_dir() else "fa-file text-gray"
+                
+                if item.is_file():
+                    if ext in [".mp4", ".avi", ".mov", ".mkv"]:
+                        icon = "fa-file-video text-cyan"
+                        category = "video"
+                    elif ext in [".mp3", ".wav", ".flac", ".ogg", ".aac"]:
+                        icon = "fa-file-audio text-emerald"
+                        category = "audio"
+                    elif ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]:
+                        icon = "fa-file-image text-rose"
+                        category = "image"
+                    elif ext == ".swf":
+                        icon = "fa-bolt text-yellow"
+                        category = "flash"
+                    elif ext in [".txt", ".log", ".json", ".xml"]:
+                        icon = "fa-file-code text-indigo"
+                        category = "code"
+
+                items.append({
+                    "name": item.name,
+                    "is_dir": item.is_dir(),
+                    "size": size_bytes,
+                    "ext": ext,
+                    "icon": icon,
+                    "category": category,
+                    "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item.stat().st_mtime)),
+                    "rel_path": str(rel_item).replace("\\", "/")
+                })
+        except Exception as e:
+            pass
+
+        folder_name = base_folder.name
+        
+        # Build breadcrumbs
+        crumbs = [{"name": folder_name, "link": url_prefix}]
+        if subpath:
+            parts = [p for p in subpath.split("/") if p]
+            curr_link = url_prefix
+            for part in parts:
+                curr_link += f"/{part}"
+                crumbs.append({"name": part, "link": curr_link})
+
+        crumb_html = ' <span class="divider">/</span> '.join([f'<a href="{c["link"]}">{c["name"]}</a>' for c in crumbs])
+
+        active_root = 'active' if folder_name == BASE_DIR.name else ''
+        active_uploads = 'active' if folder_name == 'uploads' else ''
+        active_temp = 'active' if folder_name == 'temp' else ''
+        active_output = 'active' if folder_name == 'output' else ''
+
+        html = f"""<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Manager - /{folder_name}/{subpath}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {{
+            --bg: #0b1120;
+            --card-bg: #1e293b;
+            --card-hover: #334155;
+            --border: #334155;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --cyan: #06b6d4;
+            --amber: #f59e0b;
+            --emerald: #10b981;
+            --rose: #f43f5e;
+            --indigo: #818cf8;
+            --yellow: #eab308;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }}
+        body {{ background-color: var(--bg); color: var(--text); padding: 24px; min-height: 100vh; }}
+        .fm-header {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }}
+        .fm-title {{ display: flex; align-items: center; gap: 12px; font-size: 1.25rem; font-weight: 600; }}
+        .fm-title i {{ color: var(--primary); font-size: 1.5rem; }}
+        .breadcrumbs {{ background: var(--card-bg); padding: 10px 16px; border-radius: 8px; border: 1px solid var(--border); font-size: 0.95rem; color: var(--muted); }}
+        .breadcrumbs a {{ color: #38bdf8; text-decoration: none; font-weight: 500; }}
+        .breadcrumbs a:hover {{ text-decoration: underline; }}
+        .breadcrumbs .divider {{ margin: 0 6px; color: var(--muted); }}
+        .nav-links {{ display: flex; gap: 8px; }}
+        .nav-btn {{ display: inline-flex; align-items: center; gap: 6px; background: var(--card-bg); color: var(--text); padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); text-decoration: none; font-size: 0.875rem; font-weight: 500; transition: all 0.2s; }}
+        .nav-btn:hover {{ background: var(--card-hover); border-color: #475569; color: #fff; }}
+        .nav-btn.active {{ background: var(--primary); border-color: var(--primary); }}
+        
+        .search-box {{ width: 100%; margin-bottom: 20px; position: relative; }}
+        .search-box input {{ width: 100%; padding: 12px 16px 12px 42px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; outline: none; }}
+        .search-box input:focus {{ border-color: var(--primary); }}
+        .search-box i {{ position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--muted); }}
+
+        .table-container {{ background: var(--card-bg); border-radius: 12px; border: 1px solid var(--border); overflow: hidden; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3); }}
+        table {{ width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }}
+        th {{ background: #0f172a; padding: 14px 18px; color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }}
+        td {{ padding: 14px 18px; border-bottom: 1px solid var(--border); vertical-align: middle; }}
+        tr:last-child td {{ border-bottom: none; }}
+        tr:hover td {{ background: rgba(255,255,255,0.03); }}
+        
+        .file-item {{ display: flex; align-items: center; gap: 12px; font-weight: 500; }}
+        .file-item i {{ font-size: 1.2rem; width: 24px; text-align: center; }}
+        .file-item a {{ color: var(--text); text-decoration: none; word-break: break-all; }}
+        .file-item a:hover {{ color: #38bdf8; text-decoration: underline; }}
+        
+        .text-amber {{ color: var(--amber); }}
+        .text-cyan {{ color: var(--cyan); }}
+        .text-emerald {{ color: var(--emerald); }}
+        .text-rose {{ color: var(--rose); }}
+        .text-indigo {{ color: var(--indigo); }}
+        .text-yellow {{ color: var(--yellow); }}
+        .text-gray {{ color: var(--muted); }}
+
+        .btn-action {{ display: inline-flex; align-items: center; gap: 4px; padding: 6px 10px; background: #0f172a; border: 1px solid var(--border); color: var(--text); border-radius: 6px; text-decoration: none; font-size: 0.8rem; margin-right: 4px; transition: all 0.15s; }}
+        .btn-action:hover {{ background: var(--primary); border-color: var(--primary); }}
+        .badge-type {{ padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; background: #0f172a; color: var(--muted); border: 1px solid var(--border); }}
+
+        /* Preview Modal */
+        .modal {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); z-index: 1000; align-items: center; justify-content: center; padding: 20px; }}
+        .modal.active {{ display: flex; }}
+        .modal-body {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; max-width: 900px; width: 100%; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }}
+        .modal-header {{ padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }}
+        .modal-content {{ padding: 20px; text-align: center; overflow-y: auto; max-height: 75vh; }}
+        .modal-content video, .modal-content img, .modal-content audio {{ max-width: 100%; max-height: 65vh; border-radius: 8px; }}
+        .close-modal {{ background: none; border: none; color: var(--muted); font-size: 1.5rem; cursor: pointer; }}
+        .close-modal:hover {{ color: #fff; }}
+    </style>
+</head>
+<body>
+    <div class="fm-header">
+        <div class="fm-title">
+            <i class="fa-solid fa-folder-tree"></i>
+            <span>File Manager</span>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-btn"><i class="fa-solid fa-house"></i> Home Studio</a>
+            <a href="/files" class="nav-btn {active_root}"><i class="fa-solid fa-folder-tree"></i> Root File Manager</a>
+            <a href="/uploads" class="nav-btn {active_uploads}"><i class="fa-solid fa-upload"></i> Uploads</a>
+            <a href="/temp" class="nav-btn {active_temp}"><i class="fa-solid fa-clock-rotate-left"></i> Temp</a>
+            <a href="/output" class="nav-btn {active_output}"><i class="fa-solid fa-circle-check"></i> Output</a>
+        </div>
+    </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+        <div class="breadcrumbs">
+            <i class="fa-solid fa-hard-drive" style="margin-right: 8px; color: var(--primary);"></i>
+            {crumb_html}
+        </div>
+        <div style="font-size: 0.85rem; color: var(--muted);">
+            Total Item: <strong>{len(items)}</strong>
+        </div>
+    </div>
+
+    <div class="search-box">
+        <i class="fa-solid fa-magnifying-glass"></i>
+        <input type="text" id="searchInput" placeholder="Cari file atau folder..." onkeyup="filterItems()">
+    </div>
+
+    <!-- Batch Selection Toolbar -->
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; background: #1e293b; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--border); flex-wrap: wrap; gap: 8px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" style="width: 18px; height: 18px; cursor: pointer;">
+            <label for="selectAllCheckbox" style="font-size: 0.9rem; font-weight: 500; cursor: pointer;">Pilih Semua</label>
+            <span style="font-size: 0.85rem; color: var(--muted); margin-left: 8px;" id="selectedCountText">(0 item dipilih)</span>
+        </div>
+        <div style="display: flex; gap: 8px;">
+            <button class="btn-action" style="background: var(--rose); border-color: var(--rose); color: white; padding: 8px 14px; font-weight: 600;" onclick="deleteSelectedItems()">
+                <i class="fa-solid fa-trash-can"></i> Hapus Terpilih
+            </button>
+            <button class="btn-action" style="background: var(--primary); border-color: var(--primary); color: white; padding: 8px 14px; font-weight: 600;" onclick="compressSelectedItems()">
+                <i class="fa-solid fa-file-zipper"></i> Kompres (.zip)
+            </button>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 40px; text-align: center;"></th>
+                    <th>Nama File / Folder</th>
+                    <th>Tipe</th>
+                    <th>Ukuran</th>
+                    <th>Modifikasi Terakhir</th>
+                    <th style="text-align: right;">Aksi</th>
+                </tr>
+            </thead>
+            <tbody id="fileTable">
+"""
+        if subpath:
+            parent_subpath = "/".join(subpath.rstrip("/").split("/")[:-1])
+            parent_link = f"{url_prefix}/{parent_subpath}" if parent_subpath else url_prefix
+            html += f"""
+                <tr>
+                    <td></td>
+                    <td colspan="5">
+                        <div class="file-item">
+                            <i class="fa-solid fa-arrow-left text-amber"></i>
+                            <a href="{parent_link}">.. (Kembali ke folder atas)</a>
+                        </div>
+                    </td>
+                </tr>
+            """
+
+        if not items:
+            html += f"""
+                <tr>
+                    <td colspan="6" style="text-align: center; padding: 40px; color: var(--muted);">
+                        <i class="fa-regular fa-folder-open" style="font-size: 2.5rem; margin-bottom: 12px; display: block;"></i>
+                        Folder ini kosong.
+                    </td>
+                </tr>
+            """
+
+        for item in items:
+            item_url = f"{url_prefix}/{item['rel_path']}"
+            size_str = "-"
+            if not item["is_dir"]:
+                size_str = f"{item['size'] / (1024 * 1024):.2f} MB" if item['size'] > 1024*1024 else f"{item['size'] / 1024:.1f} KB"
+            
+            preview_btn = ""
+            if item["category"] in ["video", "image", "audio"]:
+                preview_btn = f'<button class="btn-action" onclick="openPreview(\'{item_url}\', \'{item["category"]}\', \'{item["name"]}\')"><i class="fa-solid fa-eye"></i> Preview</button>'
+            elif not item["is_dir"]:
+                preview_btn = f'<a class="btn-action" href="{item_url}?raw=true" target="_blank"><i class="fa-solid fa-up-right-from-square"></i> Buka</a>'
+
+            download_btn = ""
+            if not item["is_dir"]:
+                download_btn = f'<a class="btn-action" href="{item_url}?download=true" download><i class="fa-solid fa-download"></i> Unduh</a>'
+
+            delete_btn = f'<button class="btn-action" style="border-color: #f43f5e; color: #f43f5e;" onclick="deleteSingleItem(\'{item["rel_path"]}\')"><i class="fa-solid fa-trash"></i></button>'
+
+            html += f"""
+                <tr class="item-row" data-name="{item['name'].lower()}">
+                    <td style="text-align: center;">
+                        <input type="checkbox" class="item-checkbox" value="{item['rel_path']}" onchange="updateSelectedCount()" style="width: 16px; height: 16px; cursor: pointer;">
+                    </td>
+                    <td>
+                        <div class="file-item">
+                            <i class="fa-solid {item['icon']}"></i>
+                            <a href="{item_url}">{item['name']}</a>
+                        </div>
+                    </td>
+                    <td><span class="badge-type">{item['category']}</span></td>
+                    <td>{size_str}</td>
+                    <td style="color: var(--muted); font-size: 0.85rem;">{item['mtime']}</td>
+                    <td style="text-align: right;">
+                        {preview_btn}
+                        {download_btn}
+                        {delete_btn}
+                    </td>
+                </tr>
+            """
+
+        html += f"""
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Preview Modal -->
+    <div class="modal" id="previewModal">
+        <div class="modal-body">
+            <div class="modal-header">
+                <h4 id="modalTitle">Preview File</h4>
+                <button class="close-modal" onclick="closePreview()">&times;</button>
+            </div>
+            <div class="modal-content" id="modalContainer"></div>
+        </div>
+    </div>
+
+    <script>
+        const currentFolderName = "{folder_name}";
+
+        function filterItems() {{
+            const query = document.getElementById('searchInput').value.toLowerCase();
+            const rows = document.querySelectorAll('.item-row');
+            rows.forEach(row => {{
+                const name = row.getAttribute('data-name');
+                if (name.includes(query)) {{
+                    row.style.display = '';
+                }} else {{
+                    row.style.display = 'none';
+                }}
+            }});
+        }}
+
+        function toggleSelectAll(master) {{
+            const checkboxes = document.querySelectorAll('.item-checkbox');
+            checkboxes.forEach(cb => {{
+                if (cb.closest('tr').style.display !== 'none') {{
+                    cb.checked = master.checked;
+                }}
+            }});
+            updateSelectedCount();
+        }}
+
+        function getSelectedItems() {{
+            const checkboxes = document.querySelectorAll('.item-checkbox:checked');
+            return Array.from(checkboxes).map(cb => cb.value);
+        }}
+
+        function updateSelectedCount() {{
+            const selected = getSelectedItems();
+            document.getElementById('selectedCountText').textContent = `(${{selected.length}} item dipilih)`;
+        }}
+
+        async function deleteSingleItem(relPath) {{
+            if (!confirm('Apakah Anda yakin ingin menghapus item ini?')) return;
+            await sendDelete([relPath]);
+        }}
+
+        async function deleteSelectedItems() {{
+            const selected = getSelectedItems();
+            if (selected.length === 0) {{
+                alert('Pilih setidaknya satu file/folder untuk dihapus!');
+                return;
+            }}
+            if (!confirm(`Apakah Anda yakin ingin menghapus ${{selected.length}} item terpilih?`)) return;
+            await sendDelete(selected);
+        }}
+
+        async function sendDelete(items) {{
+            try {{
+                const res = await fetch('/api/files/delete', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ folder_name: currentFolderName, items: items }})
+                }});
+                const data = await res.json();
+                if (data.success) {{
+                    location.reload();
+                }} else {{
+                    alert('Gagal menghapus: ' + (data.error || 'Terjadi kesalahan'));
+                }}
+            }} catch (e) {{
+                alert('Gagal melakukan koneksi ke server.');
+            }}
+        }}
+
+        async function compressSelectedItems() {{
+            const selected = getSelectedItems();
+            if (selected.length === 0) {{
+                alert('Pilih setidaknya satu file/folder untuk dikompres!');
+                return;
+            }}
+
+            try {{
+                const res = await fetch('/api/files/compress', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ folder_name: currentFolderName, items: selected }})
+                }});
+                const data = await res.json();
+                if (data.success && data.zip_url) {{
+                    window.location.href = data.zip_url;
+                }} else {{
+                    alert('Gagal mengompres: ' + (data.error || 'Terjadi kesalahan'));
+                }}
+            }} catch (e) {{
+                alert('Gagal membuat arsip zip.');
+            }}
+        }}
+
+        function openPreview(url, category, name) {{
+            const modal = document.getElementById('previewModal');
+            const container = document.getElementById('modalContainer');
+            const title = document.getElementById('modalTitle');
+            title.textContent = name;
+            container.innerHTML = '';
+
+            if (category === 'video') {{
+                container.innerHTML = `<video src="${{url}}" controls autoplay style="width: 100%;"></video>`;
+            }} else if (category === 'image') {{
+                container.innerHTML = `<img src="${{url}}" alt="${{name}}">`;
+            }} else if (category === 'audio') {{
+                container.innerHTML = `<audio src="${{url}}" controls autoplay style="width: 100%; margin-top: 20px;"></audio>`;
+            }}
+
+            modal.classList.add('active');
+        }}
+
+        function closePreview() {{
+            const modal = document.getElementById('previewModal');
+            const container = document.getElementById('modalContainer');
+            modal.classList.remove('active');
+            container.innerHTML = '';
+        }}
+    </script>
+</body>
+</html>
+"""
+        return html
+    
+    return "File atau folder tidak ditemukan", 404
+
+@app.route("/files", defaults={"subpath": ""})
+@app.route("/files/<path:subpath>")
+def serve_files_root(subpath):
+    # Root file manager endpoint showing BASE_DIR folders (uploads, temp, output)
+    return serve_folder_files(BASE_DIR, subpath, url_prefix="/files")
+
+@app.route("/uploads", defaults={"subpath": ""})
+@app.route("/uploads/<path:subpath>")
+def serve_uploads(subpath):
+    return serve_folder_files(UPLOADS_DIR, subpath)
+
+@app.route("/temp", defaults={"subpath": ""})
+@app.route("/temp/<path:subpath>")
+def serve_temp(subpath):
+    return serve_folder_files(TEMP_DIR, subpath)
+
+@app.route("/output", defaults={"subpath": ""})
+@app.route("/output/<path:subpath>")
+def serve_output(subpath):
+    return serve_folder_files(OUTPUT_DIR, subpath)
+
+def resolve_allowed_path(folder_name, subpath):
+    folder_map = {
+        "uploads": UPLOADS_DIR,
+        "temp": TEMP_DIR,
+        "output": OUTPUT_DIR,
+        BASE_DIR.name: BASE_DIR
+    }
+    base = folder_map.get(folder_name)
+    if not base:
+        return None
+    
+    target = (base / subpath).resolve()
+    # Security check: must be strictly inside allowed directories (UPLOADS_DIR, TEMP_DIR, OUTPUT_DIR)
+    allowed_roots = [UPLOADS_DIR.resolve(), TEMP_DIR.resolve(), OUTPUT_DIR.resolve()]
+    is_valid = any(str(target).startswith(str(root)) for root in allowed_roots)
+    if not is_valid:
+        return None
+    return target
+
+@app.route("/api/files/delete", methods=["POST"])
+def delete_file_manager_items():
+    data = request.json or {}
+    folder_name = data.get("folder_name", "")
+    items = data.get("items", [])  # list of relative paths
+    
+    if not items:
+        return jsonify({"error": "Tidak ada item yang dipilih untuk dihapus."}), 400
+
+    deleted_count = 0
+    errors = []
+
+    for item_rel in items:
+        target = resolve_allowed_path(folder_name, item_rel)
+        if not target or not target.exists():
+            errors.append(f"Akses ditolak atau item tidak ditemukan: {item_rel}")
+            continue
+
+        try:
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                os.remove(target)
+            deleted_count += 1
+        except Exception as e:
+            errors.append(f"Gagal menghapus {item_rel}: {str(e)}")
+
+    return jsonify({
+        "success": True,
+        "deleted_count": deleted_count,
+        "errors": errors
+    })
+
+@app.route("/api/files/compress", methods=["POST"])
+def compress_file_manager_items():
+    data = request.json or {}
+    folder_name = data.get("folder_name", "")
+    items = data.get("items", [])
+    
+    if not items:
+        return jsonify({"error": "Tidak ada item yang dipilih untuk dikompres."}), 400
+
+    targets = []
+    for item_rel in items:
+        target = resolve_allowed_path(folder_name, item_rel)
+        if target and target.exists():
+            targets.append((item_rel, target))
+
+    if not targets:
+        return jsonify({"error": "Item yang dipilih tidak ditemukan."}), 400
+
+    zip_filename = f"compressed_{int(time.time())}.zip"
+    zip_path = TEMP_DIR / zip_filename
+
+    try:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+            for item_rel, target in targets:
+                if target.is_file():
+                    z.write(target, arcname=target.name)
+                elif target.is_dir():
+                    for root, dirs, files in os.walk(target):
+                        for file in files:
+                            full_p = Path(root) / file
+                            arc_name = full_p.relative_to(target.parent)
+                            z.write(full_p, arcname=str(arc_name))
+        
+        return jsonify({
+            "success": True,
+            "zip_url": f"/temp/{zip_filename}?download=true",
+            "zip_name": zip_filename
+        })
+    except Exception as e:
+        return jsonify({"error": f"Gagal mengompres file: {str(e)}"}), 500
 
 # In-memory storage for conversion tasks
 # Task format:
@@ -44,7 +605,9 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max upload limit
 # }
 tasks_lock = threading.Lock()
 tasks = {}
-executor = ThreadPoolExecutor(max_workers=2)
+# max_workers=1 -> konversi dijalankan satu file pada satu waktu (antrean FIFO),
+# supaya tidak ada beberapa Java/FFmpeg yang berebut CPU & memori sekaligus.
+executor = ThreadPoolExecutor(max_workers=1)
 
 def check_environment():
     """Check availability of Java, FFmpeg, and FFDec jar."""
@@ -225,12 +788,20 @@ def convert_swf_to_mp4(task_id):
         add_log(task_id, f"ERROR: {error_msg}")
         update_task_status(task_id, status="error", error_message=error_msg)
     finally:
-        # Cleanup temp directory
+        # Cleanup temp folder and uploaded swf file
         try:
             if task_temp_dir.exists():
                 shutil.rmtree(task_temp_dir, ignore_errors=True)
+                add_log(task_id, "Folder temp berhasil dibersihkan.")
         except Exception as e:
             add_log(task_id, f"Gagal menghapus temp directory: {e}")
+
+        try:
+            if input_swf.exists():
+                os.remove(input_swf)
+                add_log(task_id, "File upload SWF berhasil dihapus.")
+        except Exception as e:
+            add_log(task_id, f"Gagal menghapus file upload SWF: {e}")
 
 @app.route("/")
 def index():
@@ -375,9 +946,24 @@ def retry_task(task_id):
 def clear_tasks():
     global tasks
     with tasks_lock:
-        # Keep pending/running tasks only
-        running_ids = [k for k, v in tasks.items() if v["status"] not in ["completed", "error"]]
-        tasks = {k: tasks[k] for k in running_ids}
+        to_delete_ids = [k for k, v in tasks.items() if v["status"] in ["completed", "error"]]
+        for task_id in to_delete_ids:
+            task = tasks[task_id]
+            # Clean up upload file if still exists
+            upload_p = Path(task.get("upload_path", ""))
+            if upload_p.exists():
+                try:
+                    os.remove(upload_p)
+                except Exception:
+                    pass
+            # Clean up temp dir if still exists
+            temp_p = TEMP_DIR / task_id
+            if temp_p.exists():
+                try:
+                    shutil.rmtree(temp_p, ignore_errors=True)
+                except Exception:
+                    pass
+            del tasks[task_id]
     return jsonify({"success": True})
 
 @app.route("/api/stream", methods=["GET"])
