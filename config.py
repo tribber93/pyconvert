@@ -38,6 +38,33 @@ TERMINAL_STATUSES = {"completed", "error", "cancelled"}
 # terkendali (mis. struktur folder yang sangat dalam / aneh).
 ZENIUS_SCAN_MAX_DEPTH = 12
 
+# Batas memori (heap) untuk proses Java/FFDec. FFDec memuat seluruh isi SWF ke
+# memori, sehingga file yang besar/kompleks bisa gagal dengan OutOfMemoryError
+# bila heap-nya terlalu kecil. Nilainya bisa dipaksa lewat PYCONVERT_JAVA_HEAP,
+# mis. "1500m" atau "3g".
+def _detect_java_heap_default():
+    """
+    Tebak batas heap yang aman dari total RAM mesin.
+
+    Dipakai ~50% dari RAM total (dan dibatasi 512m..8g), supaya JVM tidak
+    menghabiskan seluruh memori sampai proses dibunuh OS. Di VPS 2 GB ini
+    menghasilkan 1024m; di mesin besar jauh lebih longgar. Bila RAM tidak bisa
+    dideteksi, pakai 1g sebagai nilai konservatif.
+    """
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    total_mb = int(line.split()[1]) // 1024
+                    heap_mb = max(512, min(total_mb // 2, 8192))
+                    return f"{heap_mb}m"
+    except Exception:
+        pass
+    return "1g"
+
+
+JAVA_HEAP = os.environ.get("PYCONVERT_JAVA_HEAP") or _detect_java_heap_default()
+
 
 def load_secret_key():
     """

@@ -9,11 +9,27 @@ import subprocess
 import threading
 from pathlib import Path
 
-from config import FFDEC_JAR, TEMP_DIR
+from config import FFDEC_JAR, JAVA_HEAP, TEMP_DIR
 from storage import (ConversionCancelled, add_log, cancelled, kill_process_tree,
                      purge_task, register_process, tasks, tasks_lock,
                      unregister_process, update_task_status)
 from utils import build_output_path, unique_path
+
+
+def java_command(*args):
+    """
+    Susun perintah java untuk FFDec dengan batas heap eksplisit.
+
+    Tanpa -Xmx, JVM memakai heap default yang kecil sehingga SWF besar bisa
+    gagal dengan OutOfMemoryError. Batasnya bisa diatur lewat PYCONVERT_JAVA_HEAP.
+    """
+    heap_flag = f"-Xmx{JAVA_HEAP}" if JAVA_HEAP else None
+    cmd = ["java"]
+    if heap_flag:
+        cmd.append(heap_flag)
+    cmd.extend(["-jar", str(FFDEC_JAR)])
+    cmd.extend(str(a) for a in args)
+    return cmd
 
 
 def check_environment():
@@ -131,12 +147,11 @@ def _export_frames(task, input_swf, avi_out_dir, png_out_dir):
     """
     add_log(task["id"], "=== TAHAP 1: Ekstraksi Frame SWF (kondisi pertama: AVI) ===")
 
-    cmd_frames = [
-        "java", "-jar", str(FFDEC_JAR),
+    cmd_frames = java_command(
         "-format", "frame:avi",
-        "-export", "frame", str(avi_out_dir),
-        str(input_swf)
-    ]
+        "-export", "frame", avi_out_dir,
+        input_swf
+    )
     ret_frames = run_command_with_logging(task, cmd_frames)
     if cancelled(task["id"]):
         raise ConversionCancelled()
@@ -149,11 +164,10 @@ def _export_frames(task, input_swf, avi_out_dir, png_out_dir):
         add_log(task["id"], f"Peringatan: export AVI gagal ({reason}). Beralih ke kondisi kedua (PNG).")
 
         add_log(task["id"], "=== TAHAP 1 (LANJUTAN): Ekstraksi Frame SWF ke PNG ===")
-        cmd_png = [
-            "java", "-jar", str(FFDEC_JAR),
-            "-export", "frame", str(png_out_dir),
-            str(input_swf)
-        ]
+        cmd_png = java_command(
+            "-export", "frame", png_out_dir,
+            input_swf
+        )
         ret_png = run_command_with_logging(task, cmd_png)
         if cancelled(task["id"]):
             raise ConversionCancelled()
@@ -170,11 +184,10 @@ def _export_sound(task, input_swf, sound_out_dir):
     update_task_status(task["id"], status="exporting_sound", progress=45)
     add_log(task["id"], "=== TAHAP 2: Ekstraksi Suara/Audio SWF ===")
 
-    cmd_sound = [
-        "java", "-jar", str(FFDEC_JAR),
-        "-export", "sound", str(sound_out_dir),
-        str(input_swf)
-    ]
+    cmd_sound = java_command(
+        "-export", "sound", sound_out_dir,
+        input_swf
+    )
     ret_sound = run_command_with_logging(task, cmd_sound)
     if cancelled(task["id"]):
         raise ConversionCancelled()
@@ -207,7 +220,11 @@ def _build_video_input(avi_files, png_out_dir, task_temp_dir, task_id):
 
     png_files = _find_png_files(png_out_dir)
     if not png_files:
-        raise FileNotFoundError("Tidak ada file frame (AVI maupun PNG) yang berhasil diekstrak dari SWF!")
+        raise FileNotFoundError(
+            "Tidak ada file frame (AVI maupun PNG) yang berhasil diekstrak dari SWF! "
+            "Bila log FFDec menunjukkan 'OutOfMemoryError', naikkan batas heap Java "
+            f"lewat PYCONVERT_JAVA_HEAP (sekarang: {JAVA_HEAP})."
+        )
 
     add_log(task_id, f"File PNG ditemukan: {len(png_files)} frame (contoh: {png_files[0]})")
 
@@ -255,11 +272,11 @@ def _encode_mp4(task, video_input_args, sound_file, output_mp4):
 def convert_swf_to_mp4(task_id):
     """
     Background worker thread function for SWF -> MP4 conversion process.
-    Steps:
-    1. java -jar ffdec/ffdec.jar -format frame:avi -export frame avi_out input.swf
+    Steps (semua perintah FFDec memakai -Xmx dari PYCONVERT_JAVA_HEAP):
+    1. java -Xmx<heap> -jar ffdec/ffdec.jar -format frame:avi -export frame avi_out input.swf
        (kondisi pertama; bila gagal, fallback ke:)
-       java -jar ffdec/ffdec.jar -export frame frame_out input.swf
-    2. java -jar ffdec/ffdec.jar -export sound sound_out input.swf
+       java -Xmx<heap> -jar ffdec/ffdec.jar -export frame frame_out input.swf
+    2. java -Xmx<heap> -jar ffdec/ffdec.jar -export sound sound_out input.swf
     3. ffmpeg -i avi_out/*.avi -i sound_out/-1.mp3 -c:v libx264 -c:a aac -shortest output.mp4 -y
        (atau -i frame_out/%d.png bila memakai kondisi kedua)
     """
