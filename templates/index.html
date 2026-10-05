@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SWF to MP4 Converter - Batch & Realtime Progress</title>
+    <!-- Google Fonts Inter & Fira Code -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="navbar">
+            <div class="brand">
+                <div class="brand-icon">
+                    <i class="fa-solid fa-film"></i>
+                </div>
+                <div>
+                    <h1>SWF <span>to</span> MP4 Studio</h1>
+                    <p class="subtitle">High Performance Flash Converter (JPEXS FFDec + FFmpeg)</p>
+                </div>
+            </div>
+
+            <div class="env-badges" id="envBadges">
+                <div class="badge-item" id="badgeJava" title="Java Runtime Environment">
+                    <i class="fa-brands fa-java"></i> Java: <span class="status-dot"></span>
+                </div>
+                <div class="badge-item" id="badgeFfmpeg" title="FFmpeg Encoder">
+                    <i class="fa-solid fa-clapperboard"></i> FFmpeg: <span class="status-dot"></span>
+                </div>
+                <div class="badge-item" id="badgeFfdec" title="JPEXS FFDec Jar File">
+                    <i class="fa-solid fa-box-open"></i> FFDec Jar: <span class="status-dot"></span>
+                </div>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <!-- Dropzone Section -->
+            <section class="dropzone-section">
+                <div class="dropzone" id="dropzone">
+                    <input type="file" id="fileInput" multiple accept=".swf" class="file-input">
+                    <div class="dropzone-content">
+                        <div class="dropzone-icon">
+                            <i class="fa-solid fa-cloud-arrow-up"></i>
+                        </div>
+                        <h3>Tarik & Lepas File <span>.SWF</span> Di Sini</h3>
+                        <p>Atau klik untuk memilih multiple file SWF dari komputer Anda</p>
+                        <div class="upload-btn-container">
+                            <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+                                <i class="fa-solid fa-folder-open"></i> Pilih File SWF
+                            </button>
+                        </div>
+                        <span class="file-hint"><i class="fa-solid fa-layer-group"></i> Mendukung konversi banyak file sekaligus (Batch Processing)</span>
+                    </div>
+                </div>
+
+                <!-- Selected Files Pending Upload Bar -->
+                <div class="staged-files-panel hidden" id="stagedPanel">
+                    <div class="staged-header">
+                        <h4><i class="fa-solid fa-list-check"></i> File Terpilih (<span id="stagedCount">0</span> file)</h4>
+                        <div class="staged-actions">
+                            <button class="btn btn-sm btn-ghost" onclick="clearStagedFiles()">Batal</button>
+                            <button class="btn btn-sm btn-success" id="startBatchBtn" onclick="uploadStagedFiles()">
+                                <i class="fa-solid fa-play"></i> Mulai Konversi
+                            </button>
+                        </div>
+                    </div>
+                    <div class="staged-list" id="stagedList"></div>
+                </div>
+            </section>
+
+            <!-- Active Tasks Section -->
+            <section class="tasks-section">
+                <div class="section-header">
+                    <div class="header-left">
+                        <h2><i class="fa-solid fa-tasks"></i> Status Konversi Realtime</h2>
+                        <span class="task-count-badge" id="totalTasksBadge">0 File</span>
+                    </div>
+                    <div class="header-right">
+                        <button class="btn btn-outline" id="downloadAllBtn" onclick="downloadAllZip()" disabled>
+                            <i class="fa-solid fa-file-zipper"></i> Download Semua (.zip)
+                        </button>
+                        <button class="btn btn-ghost" onclick="clearFinishedTasks()" title="Bersihkan riwayat yang selesai">
+                            <i class="fa-solid fa-trash-can"></i> Bersihkan
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Global Progress Bar -->
+                <div class="global-progress-card hidden" id="globalProgressCard">
+                    <div class="progress-info">
+                        <span><i class="fa-solid fa-arrows-rotate fa-spin"></i> Memproses Batch... (<span id="completedCount">0</span>/<span id="totalBatchCount">0</span> Selesai)</span>
+                        <span id="globalPercentText">0%</span>
+                    </div>
+                    <div class="progress-bar-bg">
+                        <div class="progress-bar-fill" id="globalProgressBar" style="width: 0%;"></div>
+                    </div>
+                </div>
+
+                <!-- Empty State -->
+                <div class="empty-state" id="emptyState">
+                    <i class="fa-regular fa-folder-open"></i>
+                    <p>Belum ada proses konversi. Unggah file .swf di atas untuk memulai.</p>
+                </div>
+
+                <!-- Task Cards List -->
+                <div class="tasks-grid" id="tasksGrid"></div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Live Log Modal / Terminal -->
+    <div class="modal-overlay hidden" id="logModal">
+        <div class="modal-content log-modal-content">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-terminal"></i> Log Konsol Realtime: <span id="logModalTitle">File</span></h3>
+                <button class="close-btn" onclick="closeLogModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="terminal-window" id="terminalWindow">
+                    <div class="terminal-body" id="terminalLogs"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="copyLogs()"><i class="fa-solid fa-copy"></i> Salin Log</button>
+                <button class="btn btn-primary" onclick="closeLogModal()">Tutup</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Video Preview Modal -->
+    <div class="modal-overlay hidden" id="videoModal">
+        <div class="modal-content video-modal-content">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-circle-play"></i> Preview MP4: <span id="videoModalTitle">Video</span></h3>
+                <button class="close-btn" onclick="closeVideoModal()">&times;</button>
+            </div>
+            <div class="modal-body text-center">
+                <video id="player" controls autoplay class="video-player">
+                    <source src="" type="video/mp4" id="videoSource">
+                    Browser Anda tidak mendukung pemutar video HTML5.
+                </video>
+            </div>
+            <div class="modal-footer">
+                <a id="videoDownloadBtn" href="#" class="btn btn-success" download>
+                    <i class="fa-solid fa-download"></i> Unduh MP4
+                </a>
+                <button class="btn btn-primary" onclick="closeVideoModal()">Tutup</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
